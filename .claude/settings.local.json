@@ -2,7 +2,21 @@
   "permissions": {
     "allow": [
       "Bash(npm -v)",
-      "Bash(npx --yes create-next-app@latest . --typescript --tailwind --eslint --app --no-src-dir --turbopack --import-alias \"@/*\" --use-npm --yes)"
+      "Bash(npx --yes create-next-app@latest . --typescript --tailwind --eslint --app --no-src-dir --turbopack --import-alias \"@/*\" --use-npm --yes)",
+      "Bash(git check-ignore *)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(npm install *)",
+      "Bash(xargs -r kill)",
+      "Bash(curl -s -X POST -H \"Content-Type: application/json\" http://localhost:3000/api/agent -d \"\" -w \"\\\\n[HTTP %{http_code}]\\\\n\")",
+      "Bash(curl -s -X POST -H \"Content-Type: application/json\" http://localhost:3000/api/agent -d '{\"message\":\"hi\"}' -w \"\\\\n[HTTP %{http_code}]\\\\n\")",
+      "Bash(curl -s -X POST -H \"Content-Type: application/json\" http://localhost:3000/api/agent -d '{\"datasetId\":\"abc\"}' -w \"\\\\n[HTTP %{http_code}]\\\\n\")",
+      "Bash(curl -s -F \"file=@/Users/vae/Documents/ai-project/data-analysis-agent/scripts/sample.csv\" http://localhost:3000/api/upload)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('name:',d.get\\('name'\\)\\); print\\('version:',d.get\\('version'\\)\\); print\\('description:',d.get\\('description'\\)\\); print\\('repository:',d.get\\('repository'\\)\\)\")",
+      "Bash(node *)",
+      "Bash(curl -s -o /tmp/page.html -w \"status=%{http_code} size=%{size_download}B time=%{time_total}s\\\\n\" http://localhost:3000/)",
+      "Bash(curl -s -o /dev/null -w \"page: %{http_code}\\\\n\" http://localhost:3000/)",
+      "Bash(git add *)"
     ]
   }
 }
