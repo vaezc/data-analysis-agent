@@ -1,26 +1,133 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/* class-based dark mode，搭配 next-themes attribute="class" 使用。
+   有了 token 体系后，组件只写 `bg-card / text-fg` 等语义 class，
+   主题切换会自动改 CSS 变量值，不需要写 `dark:bg-...` 修饰。 */
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  /* 语义颜色 token —— 由下方 :root / .dark 提供具体值 */
+  --color-bg: var(--bg);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-card: var(--card);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-success: var(--success);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+:root {
+  color-scheme: light;
+  --bg: #fafafa;            /* zinc-50  —— 主背景 */
+  --fg: #18181b;            /* zinc-900 —— 主文字 */
+  --fg-muted: #52525b;      /* zinc-600 —— 次文字 */
+  --fg-subtle: #a1a1aa;     /* zinc-400 —— 弱文字 / placeholder */
+  --card: #ffffff;          /* 卡片 / 顶栏 / 输入框背景 */
+  --surface: #f4f4f5;       /* zinc-100 —— 内层填充（code 块、悬停底） */
+  --surface-hover: #e4e4e7; /* zinc-200 —— 按钮 hover */
+  --border: #e4e4e7;        /* zinc-200 —— 标准边框 */
+  --border-strong: #d4d4d8; /* zinc-300 —— 强边框（虚线上传框） */
+  --accent: #4f46e5;        /* indigo-600 —— 主色（专业 SaaS 色系，Stripe / Linear 调性） */
+  --accent-fg: #ffffff;     /* 主色上的文字 */
+  --accent-soft: #eef2ff;   /* indigo-50  —— 主色 tint 背景 */
+  --danger: #dc2626;        /* red-600 */
+  --danger-soft: #fef2f2;   /* red-50 */
+  --success: #10b981;       /* emerald-500 */
+}
+
+/* ---------- Motion ---------- */
+
+@keyframes message-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* chat typing dots 经典波浪动画：错开 delay 形成波浪感 */
+@keyframes typing-dot {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  30% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+
+/* 通用淡入：元素新挂载时柔和出现（图表卡片、thinking indicator 等） */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 文字切换：用 key={text} 触发 remount，让 step summary 描述的切换不突兀 */
+@keyframes text-swap {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 尊重 prefers-reduced-motion：动效仅在用户未明确减少动效时启用 */
+@media (prefers-reduced-motion: no-preference) {
+  .animate-message-in {
+    animation: message-in 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .animate-fade-in {
+    animation: fade-in 180ms ease-out;
+  }
+  .animate-text-swap {
+    animation: text-swap 200ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .animate-typing-dot {
+    animation: typing-dot 1.4s ease-in-out infinite;
+  }
+}
+
+.dark {
+  color-scheme: dark;
+  /* 不用纯黑（zinc-950 #09090b 过死、过冷），用稍带紫蓝调的深色，
+     更符合 Linear / Vercel / ChatGPT 等专业 SaaS 的 dark 调性 */
+  --bg: #0a0a0d;            /* 页面底（最深一层） */
+  --fg: #fafafa;
+  --fg-muted: #a1a1aa;      /* zinc-400 */
+  --fg-subtle: #71717a;     /* zinc-500 */
+  --card: #16161a;          /* 主面板（sidebar / header / input），与 bg 差 +12，可见 */
+  --surface: #24242a;       /* 内层（hover、code、tag、step icon），与 card 差 +14 */
+  --surface-hover: #31313a;
+  --border: #2a2a30;        /* 边框比 surface 略亮，能看清分界 */
+  --border-strong: #3f3f46;
+  --accent: #6366f1;        /* indigo-500 — dark 下用稍浅以提高 WCAG 对比度 */
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(99 102 241 / 0.18);
+  --danger: #ef4444;
+  --danger-soft: rgb(239 68 68 / 0.15);
+  --success: #10b981;
 }
