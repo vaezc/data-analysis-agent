@@ -62,7 +62,16 @@ function loadConfig(): LlmConfig {
 
   const apiKey = process.env.LLM_API_KEY
   if (!apiKey) {
-    throw new Error('LLM_API_KEY 未设置，请在 .env.local 中配置')
+    // 详细诊断信息只输出到服务端日志（Vercel Function Logs），不暴露给客户端
+    // 只输出 key 名和 typeof，永远不读取 value
+    console.error('[LLM Config Error]', {
+      typeof_LLM_API_KEY: typeof process.env.LLM_API_KEY,
+      available_LLM_keys: Object.keys(process.env).filter((k) =>
+        k.startsWith('LLM_'),
+      ),
+      VERCEL_ENV: process.env.VERCEL_ENV,
+    })
+    throw new Error('LLM_API_KEY 未配置，请检查服务端环境变量（详见服务端日志）')
   }
 
   const defaults = PROVIDER_DEFAULTS[provider]
