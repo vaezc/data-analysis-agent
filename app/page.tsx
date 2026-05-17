@@ -1,6 +1,6 @@
 'use client'
 
-import { BarChart3, Loader2, Users } from 'lucide-react'
+import { BarChart3, Loader2, Trash2, Users } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { ThemeToggle } from '@/components/ui/ThemeToggle'
@@ -55,6 +55,30 @@ export default function Home() {
   const handleUploaded = (ds: UploadedDataset) => {
     setDatasets((prev) => [ds, ...prev])
     setActiveId(ds.id)
+  }
+
+  /**
+   * 删除数据集：confirm → DELETE /api/datasets/[id] → 从前端 state 移除。
+   * 如果被删的是当前 active，清空 activeId（回到 EmptyState）。
+   */
+  const handleDeleteDataset = async (id: string, name: string) => {
+    if (!confirm(`确定删除数据集「${name}」？\n该操作会同时清空相关对话历史，且不可恢复。`)) {
+      return
+    }
+    try {
+      const res = await fetch(`/api/datasets/${id}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(body.error ?? `HTTP ${res.status}`)
+      }
+      setDatasets((prev) => prev.filter((d) => d.id !== id))
+      if (activeId === id) {
+        setActiveId(null)
+      }
+    } catch (e) {
+      console.error('Delete dataset failed:', e)
+      alert(`删除失败：${e instanceof Error ? e.message : String(e)}`)
+    }
   }
 
   /**
@@ -173,27 +197,43 @@ export default function Home() {
               {datasets.map((ds) => {
                 const isActive = ds.id === activeId
                 return (
-                  <button
+                  <div
                     key={ds.id}
-                    type="button"
-                    onClick={() => setActiveId(ds.id)}
-                    className={`w-full text-left rounded-md px-3 py-2 transition duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                    className={`group relative rounded-md transition duration-150 ${
                       isActive
                         ? 'bg-accent-soft ring-1 ring-inset ring-accent/30'
                         : 'hover:bg-surface'
                     }`}
                   >
-                    <div
-                      className={`text-sm font-medium truncate ${
-                        isActive ? 'text-accent' : 'text-fg'
-                      }`}
+                    <button
+                      type="button"
+                      onClick={() => setActiveId(ds.id)}
+                      className="w-full text-left px-3 py-2 pr-9 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-md"
                     >
-                      {ds.name}
-                    </div>
-                    <div className="text-[11px] text-fg-muted mt-0.5 tabular-nums">
-                      {ds.rowCount} 行 · {ds.columns.length} 列
-                    </div>
-                  </button>
+                      <div
+                        className={`text-sm font-medium truncate ${
+                          isActive ? 'text-accent' : 'text-fg'
+                        }`}
+                      >
+                        {ds.name}
+                      </div>
+                      <div className="text-[11px] text-fg-muted mt-0.5 tabular-nums">
+                        {ds.rowCount} 行 · {ds.columns.length} 列
+                      </div>
+                    </button>
+                    {/* hover/active 时显示删除按钮，绝对定位避免影响主按钮 click area */}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleDeleteDataset(ds.id, ds.name)
+                      }}
+                      aria-label={`删除 ${ds.name}`}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-fg-subtle opacity-0 transition duration-150 group-hover:opacity-100 hover:bg-danger/10 hover:text-danger focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40"
+                    >
+                      <Trash2 className="size-3.5" strokeWidth={1.75} />
+                    </button>
+                  </div>
                 )
               })}
             </div>

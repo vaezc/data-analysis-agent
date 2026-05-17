@@ -1,6 +1,13 @@
 "use client";
 
-import { Database, Loader2, Send, Sparkles } from "lucide-react";
+import {
+  Database,
+  Loader2,
+  RotateCcw,
+  Send,
+  Sparkles,
+  X,
+} from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -22,9 +29,33 @@ interface ChatPanelProps {
 }
 
 export function ChatPanel({ datasetId }: ChatPanelProps) {
-  const { messages, send, isStreaming, isLoadingHistory, error } = useAgent({
+  const {
+    messages,
+    send,
+    isStreaming,
+    isLoadingHistory,
+    error,
+    clearError,
+    reset,
+  } = useAgent({
     datasetId,
   });
+  const [isResetting, setIsResetting] = useState(false);
+
+  const handleNewChat = async () => {
+    if (
+      !confirm(
+        '确定开始新对话？\n当前对话历史会被清空（数据集保留），且不可恢复。',
+      )
+    )
+      return;
+    setIsResetting(true);
+    try {
+      await reset();
+    } finally {
+      setIsResetting(false);
+    }
+  };
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   // sticky 状态：用户当前是否"贴底"。新内容来时只在此状态为 true 才跟随。
@@ -104,7 +135,24 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
     Boolean(datasetId) && !isStreaming && input.trim().length > 0;
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div className="flex-1 flex flex-col min-h-0 relative">
+      {/* New Chat 按钮：右上角 floating，仅在有对话时显示 */}
+      {messages.length > 0 && !isLoadingHistory && (
+        <button
+          type="button"
+          onClick={handleNewChat}
+          disabled={isResetting || isStreaming}
+          aria-label="开始新对话"
+          className="absolute right-4 top-4 z-10 inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-fg-muted shadow-sm transition duration-150 hover:bg-surface hover:text-fg active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          {isResetting ? (
+            <Loader2 className="size-3.5 animate-spin" strokeWidth={2} />
+          ) : (
+            <RotateCcw className="size-3.5" strokeWidth={1.75} />
+          )}
+          新对话
+        </button>
+      )}
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl px-6 py-8 space-y-6">
           {isLoadingHistory ? (
@@ -126,8 +174,16 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
 
       {error && (
         <div className="border-t border-danger/20 bg-danger-soft">
-          <div className="mx-auto max-w-3xl px-6 py-2.5 text-sm text-danger">
-            {error}
+          <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-6 py-2.5 text-sm text-danger">
+            <span className="flex-1 min-w-0">{error}</span>
+            <button
+              type="button"
+              onClick={clearError}
+              aria-label="关闭错误提示"
+              className="shrink-0 rounded p-0.5 text-danger/70 transition duration-150 hover:bg-danger/10 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40"
+            >
+              <X className="size-4" />
+            </button>
           </div>
         </div>
       )}

@@ -41,8 +41,10 @@ interface UseAgentReturn {
   isLoadingHistory: boolean
   /** 最近一次错误的消息，新一次 send 开始时清空 */
   error: string | null
-  /** 清空当前数据集的对话（仅前端 state；DB 清理待 New Chat 功能实现） */
-  reset: () => void
+  /** 手动清除当前错误（× 按钮用） */
+  clearError: () => void
+  /** 清空当前数据集的对话（前端 state + DB）。"New Chat" 按钮调用。 */
+  reset: () => Promise<void>
 }
 
 export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
@@ -96,13 +98,34 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
     }
   }, [datasetId])
 
-  const reset = useCallback(() => {
+  const reset = useCallback(async () => {
     abortRef.current?.abort()
     abortRef.current = null
+
+    // 先调 DELETE 清 DB；DB 失败也要清前端 state（避免不一致挂死）
+    if (datasetId) {
+      try {
+        const res = await fetch(
+          `/api/messages?datasetId=${encodeURIComponent(datasetId)}`,
+          { method: 'DELETE' },
+        )
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string
+          }
+          throw new Error(body.error ?? `HTTP ${res.status}`)
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        setError(`清空对话失败：${msg}`)
+        // 不 return —— 仍然清前端 state，否则用户卡在错误态
+      }
+    }
+
     setMessages([])
     setError(null)
     setIsStreaming(false)
-  }, [])
+  }, [datasetId])
 
   const send = useCallback(
     async (text: string) => {
@@ -172,7 +195,17 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
     [datasetId, isStreaming],
   )
 
-  return { messages, send, isStreaming, isLoadingHistory, error, reset }
+  const clearError = useCallback(() => setError(null), [])
+
+  return {
+    messages,
+    send,
+    isStreaming,
+    isLoadingHistory,
+    error,
+    clearError,
+    reset,
+  }
 }
 
 // ============================================================
