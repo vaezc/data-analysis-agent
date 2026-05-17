@@ -142,7 +142,7 @@ sequenceDiagram
 ### 本地启动
 
 ```bash
-git clone https://github.com/vaezc/-data-analysis-agent.git
+git clone https://github.com/vaezc/data-analysis-agent.git
 cd data-analysis-agent
 npm install
 cp .env.local.example .env.local
