@@ -976,6 +976,37 @@ vm.runInContext(code, { rows, Math, Object, ... }, { timeout: 5000 })
 
 **面试讲点**："我知道这个 CVE 存在，知道影响面、知道 Phase 3 怎么解决"——这是真实工程师的回答，不是"我没注意到"。
 
+### 5.8 Vercel Serverless 跨函数内存隔离
+
+**症状**：本地 dev 一切正常，部署 Vercel 后报"数据集不存在"。用户上传 → 立刻提问，但 agent 看不到 dataset。
+
+**根因**：`/api/upload` 和 `/api/agent` 在 Vercel 上是**两个独立的 Lambda function**，**完全不共享内存**。
+
+```
+浏览器           ↓
+            ┌──────────────┐
+            │  Vercel CDN  │
+            └──────┬───────┘
+                   ↓
+        ┌──────────┴─────────┐
+        ↓                    ↓
+  /api/upload Lambda    /api/agent Lambda
+  内存 Map: { id1:... }  内存 Map: { }   ← 完全独立的进程
+```
+
+模块级 `let store = new Map()` 在每个 lambda 实例独立，**永远找不到对方写入的内容**。即使是 fluid compute warm instance，跨 endpoint 也不共享。
+
+**解决**：上 Supabase 持久化（L4 + L8 一起解决）。dataset-store 全改 async Supabase queries。
+
+**面试讲点**：
+
+> "我在本地 dev 一直正常，部署到 Vercel 才发现这个问题——`/api/upload` 和 `/api/agent` 是独立 lambda，内存 Map 跨函数完全不通。**这是 Serverless 架构 vs 传统单进程 server 的核心区别**。修复就是上持久化层，我选了 Supabase——20 分钟改造 + 顺便解决了刷新丢历史的 L8 问题。"
+
+**教训**：
+- "本地能跑 ≠ 生产能跑"——Serverless 平台的 invocation model 必须早期理解
+- 内存状态只对"单实例 + 长生命周期"有效——Vercel/Lambda 都不满足
+- 持久化层不是"未来再考虑"的事，是 Serverless 的入门要求
+
 ---
 
 ## 6. 面试可能问题预演
@@ -1162,6 +1193,9 @@ vm.runInContext(code, { rows, Math, Object, ... }, { timeout: 5000 })
 已完成：
 
 - ✅ **tool result 自动截断**（L9，2026-05-15）— `truncateForLLM`，单 tool result 从 2K 降到 ~500 token
+- ✅ **Vercel 部署上线**（2026-05-15）
+- ✅ **Supabase 持久化**（L4 + L8，2026-05-17）— datasets / messages 表，解决 Vercel 跨函数内存隔离 + 刷新丢历史
+- ✅ **切换 dataset 体验 polish**（2026-05-17）— skeleton + `useLayoutEffect` 同步定位
 
 待做（按优先级排）：
 
@@ -1169,13 +1203,13 @@ vm.runInContext(code, { rows, Math, Object, ... }, { timeout: 5000 })
 2. **错误条 dismiss 按钮**（UX）
 3. **数据集删除按钮**（UX）
 4. **上传文件大小限制**（防 DoS）
-5. **Vercel 部署**（上线）
-6. **会话长度管理**（详见 6.2）：滑动窗口 + 前端 New Chat 兜底
-7. **Supabase 持久化**（消除 HMR / 刷新丢数据，L8）
-8. **E2B 沙箱**（替换 vm，L2/L3）
-9. **二次 LLM 缓存**（L10）
-10. **多 Excel sheet 支持**（4.4）
-11. **可观测性**（耗时、token 数、失败率，4.5）
+5. **会话长度管理**（详见 6.2）：滑动窗口 + 前端 New Chat 兜底
+6. **E2B 沙箱**（替换 vm，L2/L3）
+7. **二次 LLM 缓存**（L10）
+8. **多 Excel sheet 支持**（4.4）
+9. **可观测性**（耗时、token 数、失败率，4.5）
+10. **Demo 数据集 + 一键试用按钮**（降低试用门槛）
+11. **Vision 多模态 / DuckDB-WASM**（创新加分项）
 
 每一项都对应 PROGRESS.md 的具体编号，可以追溯。
 

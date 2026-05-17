@@ -76,11 +76,11 @@
 - **影响**：LLM 生成的 JS 不能用 await。当前不需要。
 - **解决**:Phase 2 E2B 解决（Python 异步本来就不同模型）。
 
-### L4. Next.js dev 模式 HMR 会清空内存 Map
+### L4. Next.js dev 模式 HMR 会清空内存 Map ✅ 已解决（2026-05-17）
 
-- **位置**：`lib/dataset-store.ts` 模块级 `Map`
-- **影响**：开发时改代码 → 数据集丢失需重传。生产 `next start` 单实例运行无问题。
-- **解决**：Phase 3 Supabase 持久化彻底解决；Phase 1/2 可接受。
+- ~~`lib/dataset-store.ts` 模块级 `Map`~~
+- ~~开发时改代码 → 数据集丢失需重传~~
+- **解决方案**：随 L8 一起，dataset-store 迁到 Supabase，模块级 Map 删除。HMR 不再丢数据。
 
 ### L5. CSV 类型推断的边界情况
 
@@ -101,11 +101,20 @@
 - **解决方案**：`lib/agent.ts` 改为 `chatCompletionStream`，按 chunk 累积 content/reasoning/tool_calls deltas；新增 `answer_delta` SSE 事件，前端 hook 在 `case 'answer_delta'` append content。
 - **额外收获**：DeepSeek V4 thinking mode 的 `reasoning_content` 扩展字段在 reply 时必须回 echo，否则 V4 400。
 
-### L8. Agent 没有对话历史持久化
+### L8. Agent 没有对话历史持久化 ✅ 已解决（2026-05-17）
 
-- **影响**：刷新页面对话丢失。
-- **当前状态**：内存里 per-dataset 独立历史（`hooks/use-agent.ts` 用 `Map<datasetId, {messages, llmHistory}>` + useEffect cleanup），切换数据集互不污染；多轮上下文通过 `done` 事件携带 LLM messages 在前端累积、下次 send 时回传。
-- **解决**：Phase 3 Supabase 持久化到数据库才能解决刷新丢失。
+- ~~刷新页面对话丢失~~
+- ~~Vercel Serverless 跨函数（/api/upload vs /api/agent）内存不共享，dataset 跨函数找不到~~
+- **解决方案**：上 Supabase 持久化。
+  - 新建 `datasets` 表（id / name / columns / rows JSONB / row_count / created_at）
+  - 新建 `messages` 表（dataset_id / role / ui JSONB / llm JSONB / created_at）
+  - `lib/dataset-store.ts` 全改 Supabase queries（async API）
+  - 新建 `lib/messages-store.ts` 管理对话持久化
+  - 新建 `/api/datasets` GET + `/api/messages` GET
+  - `/api/agent` 改：不再从 body 读 previousMessages；入口立刻 saveUserMessage；流过程 reducer 累积 assistant state；finally 保存 assistant message
+  - `hooks/use-agent.ts` 大幅简化：去掉 storeRef / llmHistoryRef / messagesRef；切换 dataset 时 fetch /api/messages
+- **额外收获**：切换 dataset 加 skeleton + `useLayoutEffect` 同步定位到底（无滚动动画），交互更专业。
+- **效果**：解决 Vercel demo 无法工作 + 刷新丢历史 + HMR 丢数据（同时解 L4）。
 
 ### L9. tool result 没做截断 ✅ 已解决（2026-05-15）
 
@@ -198,32 +207,36 @@
 - ✅ **多轮对话上下文**：per-dataset Map 存档 + done 事件回传 LLM messages，切换数据集互不污染
 - ✅ **UI/UX polish**：参考 Notion 原型、品牌 logo 接入（`public/image.png`）、消息淡入动画、流式输入框 floating 设计、prefers-reduced-motion 适配
 
-**Phase 3 已完成项（2026-05-14）：**
+**Phase 3 已完成项：**
 
-- ✅ **报告导出（HTML）**：`generate_report` 工具落地，`ReportCard` 卡片渲染 + 一键下载独立 HTML（marked 转换 + inline CSS，offline 双击可看）
+- ✅ **报告导出（HTML）**（2026-05-14）：`generate_report` 工具 + `ReportCard` 卡片 + 内嵌 SVG 图表 + 一键下载独立 HTML
+- ✅ **Vercel 部署**（2026-05-15）：项目上线
+- ✅ **Supabase 持久化**（2026-05-17）：datasets + messages 表（详见 L8）
+- ✅ **切换 dataset 体验 polish**（2026-05-17）：HistorySkeleton + `useLayoutEffect` 同步定位
 
 ---
 
-### 当前状态（2026-05-14）
+### 当前状态（2026-05-17）
 
-**Phase 2 收尾**：只剩 E2B 沙箱（L2/L3）。Demo 用 `node:vm` 完全够用，可推到 Phase 3 后。
+**Phase 2 收尾**：只剩 E2B 沙箱（L2/L3）。Demo 用 `node:vm` 完全够用。
 
-**Phase 3 进行中**：
+**Phase 3 完成度：~85%**
 - ✅ 报告导出
-- ⏳ Supabase 持久化（L8）
-- ⏳ Vercel 部署
-- ⏳ 2~3 个 Demo 数据集
+- ✅ Supabase 持久化（L8 解决，附带解 L4）
+- ✅ Vercel 部署
+- ⏳ 2~3 个 Demo 数据集 + 截图/GIF
 
-### 上线前必做扫尾（按优先级）
+### 还可以做的扫尾
 
-1. **xlsx CVE 升级或替换**（L1）— 上线前必做
+1. **xlsx CVE 升级或替换**（L1）— 安全债，公网部署后越早越好
 2. **错误条 dismiss × 按钮** — 5 分钟，UX 必备
 3. **数据集删除** — 20 分钟，UX 必备
 4. **上传文件大小限制**（4.6）— 防 DoS
-5. **多 dataset 切换稳定性回测** — 来回切 + 中途 streaming 边界用例
+5. **滑动窗口 + New Chat 按钮** — 长对话上下文管理
+6. **Demo 数据集 + 一键试用按钮** — 降低试用门槛
 
-### 推荐路径
+### 推荐下一步
 
-**🅰️ 修复扫尾（~1 小时）→ 🅱️ Vercel 部署（~1.5 小时）→ 🅲️ Demo 物料（~30 分钟）**
+随便挑：扫尾代码 / 准备 Demo 物料（截图 GIF README）/ Vision 多模态创新点 / DuckDB-WASM 替换 vm。
 
-一个下午能拿到可分享的 demo URL。Supabase 持久化 / E2B 沙箱可推到上线后再做。
+底线：项目主体功能已完整可用。
