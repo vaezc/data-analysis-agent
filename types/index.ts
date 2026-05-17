@@ -129,10 +129,16 @@ export interface AgentStep {
 
 /**
  * 对话消息（前端状态）。
- * 用户消息只有文字；Agent 消息聚合了步骤、图表和最终回答三块。
+ * 用户消息可附带图片（vision 多模态）；Agent 消息聚合了步骤、图表和最终回答三块。
  */
 export type ChatMessage =
-  | { id: string; role: 'user'; content: string }
+  | {
+      id: string
+      role: 'user'
+      content: string
+      /** 用户附加的图片（data URL，data:image/...;base64,...）。需要 vision-capable LLM */
+      images?: string[]
+    }
   | {
       id: string
       role: 'assistant'

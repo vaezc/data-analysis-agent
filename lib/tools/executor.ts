@@ -6,13 +6,13 @@
 // 设计要点：
 //   - 错误不抛，捕获后转成 JSON 字符串作为工具结果，让 LLM 自己决定怎么办
 //   - chart / report 这类业务事件通过 ctx.emit 推 SSE，不放进 tool result
-//   - run_analysis 用二次 LLM 调用生成 JS，再用 node:vm 沙箱执行
-//     —— Phase 2 接 E2B 后，替换 execAnalysis 一个函数即可
+//   - run_analysis 用二次 LLM 生成 SQLite SQL，再用 better-sqlite3 :memory:
+//     执行（替换 node:vm 沙箱）。优势：真 SQL 引擎、更安全、LLM 更易生成正确代码
 // ============================================================
 
-import vm from 'node:vm'
 import { chatCompletion } from '@/lib/llm'
 import { getDataset, getDatasetSummary } from '@/lib/dataset-store'
+import { runSQLOnDataset } from '@/lib/tools/sqlite-runner'
 import type {
   AnalysisResult,
   ChartConfig,
@@ -92,33 +92,30 @@ async function execInspect(rawArgs: unknown) {
 // run_analysis
 // ============================================================
 
-const ANALYSIS_SYSTEM_PROMPT = `你是数据分析代码生成器。根据用户的自然语言意图，生成一段 JavaScript 代码计算分析结果。
+const ANALYSIS_SYSTEM_PROMPT = `你是数据分析 SQL 生成器。根据用户的自然语言意图，生成一条 SQLite SQL 查询。
 
 执行环境：
-- 变量 \`rows\` 是 Array<Record<string, unknown>>，每个元素代表一行数据
-- 全局可用：Math, Object, Array, Number, String, Boolean, Date, JSON
-- 禁止使用 require/import/fs/process/setTimeout/Promise 等
+- 表名固定为 \`data\`
+- 列名**必须用双引号包裹**（如 "region"），支持中文 / 空格 / 关键字
+- SQL 方言：SQLite（GROUP BY / HAVING / ORDER BY / LIMIT / CTE / 窗口函数都支持）
+- 数据类型：number → REAL，boolean → INTEGER (0/1)，date → TEXT（ISO 格式 YYYY-MM-DD）
 
 输出要求：
-- 只输出代码，不要 markdown 围栏（不要 \`\`\`js）、不要解释、不要 import
-- 必须以 return 语句结束
+- 只输出一条 SELECT 或 WITH 语句，不要 markdown 围栏（不要 \`\`\`sql）、不要解释
 - 必须使用提供的真实列名
-- 处理可能的 null/undefined 值（用 ?? 兜底）
-- 结果要可被 JSON.stringify
+- 处理 null 用 COALESCE 或 IFNULL
+- 字符串字面量用单引号
+- **严禁** INSERT / UPDATE / DELETE / DROP / ALTER / ATTACH / PRAGMA 等修改性语句
 
 示例：
 列：region(string), sales(number)
 意图：按 region 分组对 sales 求和，按总和降序
 
 输出：
-const grouped = rows.reduce((acc, r) => {
-  const k = r.region
-  acc[k] = (acc[k] ?? 0) + Number(r.sales ?? 0)
-  return acc
-}, {})
-return Object.entries(grouped)
-  .map(([region, total]) => ({ region, total }))
-  .sort((a, b) => b.total - a.total)`
+SELECT "region", SUM(COALESCE("sales", 0)) AS total
+FROM data
+GROUP BY "region"
+ORDER BY total DESC`
 
 async function execAnalysis(rawArgs: unknown): Promise<AnalysisResult> {
   const args = asObject(rawArgs)
@@ -129,8 +126,8 @@ async function execAnalysis(rawArgs: unknown): Promise<AnalysisResult> {
   const ds = await getDataset(datasetId)
   if (!ds) throw new Error(`数据集不存在：${datasetId}`)
 
-  const code = await generateAnalysisCode(ds.columns, ds.rows.slice(0, 2), intent)
-  const result = runInSandbox(code, ds.rows)
+  const sql = await generateAnalysisSQL(ds.columns, ds.rows.slice(0, 2), intent)
+  const result = runSQLOnDataset(sql, ds.columns, ds.rows)
 
   return { description, data: truncateForLLM(result) }
 }
@@ -183,12 +180,12 @@ function truncateForLLM(value: unknown): unknown {
   return value
 }
 
-async function generateAnalysisCode(
+async function generateAnalysisSQL(
   columns: Column[],
   sample: Row[],
   intent: string,
 ): Promise<string> {
-  const schemaStr = columns.map((c) => `${c.name}(${c.type})`).join(', ')
+  const schemaStr = columns.map((c) => `"${c.name}"(${c.type})`).join(', ')
   const userMsg =
     `列：${schemaStr}\n` +
     `样本（前 ${sample.length} 行）：${JSON.stringify(sample)}\n` +
@@ -202,41 +199,14 @@ async function generateAnalysisCode(
     temperature: 0.2,
   })
 
-  let code = completion.choices[0]?.message?.content?.trim() ?? ''
+  let sql = completion.choices[0]?.message?.content?.trim() ?? ''
   // 去掉 LLM 偶尔加上的 markdown 围栏
-  code = code
-    .replace(/^```(?:javascript|js|typescript|ts)?\s*\n/, '')
+  sql = sql
+    .replace(/^```(?:sql|sqlite)?\s*\n/i, '')
     .replace(/\n?```$/, '')
     .trim()
-  if (!code) throw new Error('LLM 未生成代码')
-  if (!/\breturn\b/.test(code)) {
-    throw new Error('LLM 生成的代码缺少 return 语句')
-  }
-  return code
-}
-
-function runInSandbox(code: string, rows: Row[]): unknown {
-  const context = vm.createContext({
-    rows,
-    Math,
-    Object,
-    Array,
-    Number,
-    String,
-    Boolean,
-    Date,
-    JSON,
-  })
-  const wrapped = `(() => { ${code} })()`
-  try {
-    return vm.runInContext(wrapped, context, {
-      timeout: 5000,
-      breakOnSigint: true,
-    })
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    throw new Error(`分析代码执行失败：${msg}`)
-  }
+  if (!sql) throw new Error('LLM 未生成 SQL')
+  return sql
 }
 
 // ============================================================

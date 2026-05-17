@@ -23,8 +23,25 @@ export function MessageBubble({
   if (message.role === 'user') {
     return (
       <div className="flex justify-end animate-message-in">
-        <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-accent px-4 py-2.5 text-[15px] text-accent-fg leading-relaxed whitespace-pre-wrap">
-          {message.content}
+        <div className="max-w-[80%] space-y-2">
+          {/* 附加图片：放在文字气泡上方，与用户气泡右对齐 */}
+          {message.images && message.images.length > 0 && (
+            <div className="flex flex-wrap justify-end gap-2">
+              {message.images.map((url, i) => (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={i}
+                  src={url}
+                  alt={`用户上传图片 ${i + 1}`}
+                  className="max-h-48 max-w-full rounded-xl border border-border object-contain"
+                />
+              ))}
+            </div>
+          )}
+          {/* 文字气泡：有图但无文本时也能空 string，但 ChatPanel handleSubmit 已强制 text 必填 */}
+          <div className="rounded-2xl rounded-br-sm bg-accent px-4 py-2.5 text-[15px] text-accent-fg leading-relaxed whitespace-pre-wrap">
+            {message.content}
+          </div>
         </div>
       </div>
     )

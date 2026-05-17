@@ -16,7 +16,8 @@ export const runtime = 'nodejs'
 // 单文件大小上限（防 DoS）。Vercel hobby 上限 4.5MB，自部署可调更高。
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
 
-const ALLOWED_EXTS = new Set(['csv', 'xlsx', 'xls'])
+// .xls (Office 2003 二进制) 不支持，exceljs 仅处理 OOXML 格式的 xlsx
+const ALLOWED_EXTS = new Set(['csv', 'xlsx'])
 
 export async function POST(req: NextRequest) {
   try {
@@ -42,7 +43,7 @@ export async function POST(req: NextRequest) {
     const ext = file.name.toLowerCase().split('.').pop() ?? ''
     if (!ALLOWED_EXTS.has(ext)) {
       return errorResponse(
-        `不支持的文件类型：.${ext}（仅支持 csv / xlsx / xls）`,
+        `不支持的文件类型：.${ext}（仅支持 csv / xlsx）`,
         'UNSUPPORTED_TYPE',
         400,
       )

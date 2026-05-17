@@ -55,6 +55,8 @@ export interface RunAgentParams {
   datasetId: string
   /** 用户当前轮的消息 */
   userMessage: string
+  /** 用户附带的图片 data URLs（vision multimodal；需要 vision-capable LLM） */
+  userImages?: string[]
   /** 历史消息（多轮对话用，Phase 1 单轮可不传） */
   previousMessages?: ChatCompletionMessageParam[]
   /** SSE 事件回调 */
@@ -62,7 +64,28 @@ export interface RunAgentParams {
 }
 
 export async function runAgent(params: RunAgentParams): Promise<void> {
-  const { datasetId, userMessage, previousMessages = [], onEvent } = params
+  const {
+    datasetId,
+    userMessage,
+    userImages,
+    previousMessages = [],
+    onEvent,
+  } = params
+
+  // 构造 user message：有图片时用 OpenAI multimodal content array 格式
+  const userMessageParam: ChatCompletionMessageParam =
+    userImages && userImages.length > 0
+      ? {
+          role: 'user',
+          content: [
+            { type: 'text', text: userMessage },
+            ...userImages.map((url) => ({
+              type: 'image_url' as const,
+              image_url: { url },
+            })),
+          ],
+        }
+      : { role: 'user', content: userMessage }
 
   const messages: ChatCompletionMessageParam[] = [
     {
@@ -72,7 +95,7 @@ export async function runAgent(params: RunAgentParams): Promise<void> {
         `\n\n当前数据集 ID：${datasetId}（调用工具时必须传入此 ID 作为 dataset_id 参数）`,
     },
     ...previousMessages,
-    { role: 'user', content: userMessage },
+    userMessageParam,
   ]
 
   const ctx: ToolExecutionContext = { emit: onEvent }

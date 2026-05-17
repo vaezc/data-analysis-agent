@@ -71,6 +71,22 @@ export async function POST(req: NextRequest) {
   }
   const userText = message.trim()
 
+  // 可选 images（vision multimodal）：data URL 数组
+  const rawImages = body.images
+  let userImages: string[] | undefined
+  if (rawImages !== undefined) {
+    if (
+      !Array.isArray(rawImages) ||
+      !rawImages.every((s) => typeof s === 'string' && s.startsWith('data:'))
+    ) {
+      return NextResponse.json(
+        { error: 'images 必须是 data URL 字符串数组', code: 'INVALID_IMAGES' },
+        { status: 400 },
+      )
+    }
+    userImages = rawImages
+  }
+
   // ---------- 2. 加载历史 + 入库用户消息 ----------
   let previousMessages: ChatCompletionMessageParam[] = []
   try {
@@ -85,7 +101,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    await saveUserMessage(datasetId, userText)
+    await saveUserMessage(datasetId, userText, userImages)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return NextResponse.json(
@@ -135,6 +151,7 @@ export async function POST(req: NextRequest) {
         await runAgent({
           datasetId,
           userMessage: userText,
+          userImages,
           previousMessages,
           onEvent: emit,
         })

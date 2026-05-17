@@ -25,8 +25,20 @@ interface MessageRow {
 }
 
 /**
- * 加载某个 dataset 的完整对话历史。
- * 返回：UI 历史 + LLM 历史（已展平：assistant 行的 llm 数组会展开拼到结果里）。
+ * 滑动窗口大小：每次发给 LLM 的"历史"上限。
+ *
+ * 一对 user+assistant 算 2 条 messages 表行。设 40 → 最近 20 轮对话。
+ * 不设 limit 时，长对话累计 token 会 linear 增长，撞上 DeepSeek 64K 窗口或
+ * 烧钱。详见 LEARNING.md 6.2。
+ */
+const SLIDING_WINDOW_ROWS = 40
+
+/**
+ * 加载某个 dataset 的对话历史（用于 LLM 上下文）。
+ * 仅返回最近 SLIDING_WINDOW_ROWS 条 messages 行展平后的 LLM messages。
+ *
+ * 返回 uiMessages 给调用方需要时用（当前 API Route 只用 llmMessages，
+ * 但保留 uiMessages 兼容性，万一以后要在 server side 也用）。
  */
 export async function loadConversation(
   datasetId: string,
@@ -35,15 +47,18 @@ export async function loadConversation(
   llmMessages: ChatCompletionMessageParam[]
 }> {
   const supabase = getSupabase()
+  // 取最近 N 条：order DESC + limit + 内存反转回正序
+  // PostgreSQL/Supabase 不支持 "ORDER BY ASC LIMIT N FROM END"，标准做法是 DESC + LIMIT
   const { data, error } = await supabase
     .from('messages')
     .select('id, dataset_id, role, ui, llm, created_at')
     .eq('dataset_id', datasetId)
-    .order('created_at', { ascending: true })
+    .order('created_at', { ascending: false })
+    .limit(SLIDING_WINDOW_ROWS)
 
   if (error) throw new Error(`加载对话历史失败：${error.message}`)
 
-  const rows = (data ?? []) as MessageRow[]
+  const rows = ((data ?? []) as MessageRow[]).reverse()
   const uiMessages: ChatMessage[] = []
   const llmMessages: ChatCompletionMessageParam[] = []
 
@@ -76,16 +91,30 @@ export async function listMessages(datasetId: string): Promise<ChatMessage[]> {
 export async function saveUserMessage(
   datasetId: string,
   content: string,
+  images?: string[],
 ): Promise<ChatMessage> {
   const supabase = getSupabase()
   // 先生成 ID（虽然 DB 也会生成，但 ui.id 字段我们想跟 DB 的 id 对齐）
   // 简单做法：让 DB 生成 row id，自己生成 ui.id（UUID）
-  const ui: ChatMessage = {
-    id: crypto.randomUUID(),
-    role: 'user',
-    content,
-  }
-  const llm: ChatCompletionMessageParam[] = [{ role: 'user', content }]
+  const hasImages = images && images.length > 0
+  const ui: ChatMessage = hasImages
+    ? { id: crypto.randomUUID(), role: 'user', content, images }
+    : { id: crypto.randomUUID(), role: 'user', content }
+
+  const llm: ChatCompletionMessageParam[] = hasImages
+    ? [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: content },
+            ...images.map((url) => ({
+              type: 'image_url' as const,
+              image_url: { url },
+            })),
+          ],
+        },
+      ]
+    : [{ role: 'user', content }]
 
   const { error } = await supabase
     .from('messages')

@@ -2,6 +2,7 @@
 
 import {
   Database,
+  ImagePlus,
   Loader2,
   RotateCcw,
   Send,
@@ -13,6 +14,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type ChangeEvent,
   type FormEvent,
 } from "react";
 import { useAgent } from "@/hooks/use-agent";
@@ -123,12 +125,52 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
     }
   }, [messages, isLoadingHistory]);
 
+  // Vision multimodal：附加图片（data URL 数组）
+  const [attachedImages, setAttachedImages] = useState<string[]>([]);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+
+  const handleAttachImages = async (e: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
+
+    // 单张图上限 4MB（base64 后 ~5.3MB；Vercel body 上限 4.5MB，控制保守）
+    const MAX_SIZE = 4 * 1024 * 1024;
+    const valid = files.filter((f) => {
+      if (!f.type.startsWith("image/")) return false;
+      if (f.size > MAX_SIZE) return false;
+      return true;
+    });
+
+    const dataUrls = await Promise.all(
+      valid.map(
+        (f) =>
+          new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(f);
+          }),
+      ),
+    );
+    setAttachedImages((prev) => [...prev, ...dataUrls]);
+
+    // 重置 input 以便能选同一张图（onChange 才会触发）
+    if (imageInputRef.current) imageInputRef.current.value = "";
+  };
+
+  const removeAttachedImage = (idx: number) => {
+    setAttachedImages((prev) => prev.filter((_, i) => i !== idx));
+  };
+
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const text = input.trim();
     if (!text) return;
+    const imagesToSend =
+      attachedImages.length > 0 ? attachedImages : undefined;
     setInput("");
-    await send(text);
+    setAttachedImages([]);
+    await send(text, imagesToSend);
   };
 
   const canSubmit =
@@ -198,6 +240,33 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
           onSubmit={handleSubmit}
           className="mx-auto max-w-3xl px-6 pt-2 pb-4"
         >
+          {/* 附加图片预览：每张缩略图 + × 删除 */}
+          {attachedImages.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-2">
+              {attachedImages.map((url, idx) => (
+                <div
+                  key={idx}
+                  className="relative size-16 overflow-hidden rounded-lg border border-border bg-surface"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={url}
+                    alt={`附件 ${idx + 1}`}
+                    className="size-full object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeAttachedImage(idx)}
+                    aria-label="移除图片"
+                    className="absolute right-0.5 top-0.5 inline-flex size-5 items-center justify-center rounded-full bg-bg/80 text-fg shadow-sm transition duration-150 hover:bg-danger hover:text-accent-fg"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="flex items-center gap-2 rounded-2xl border border-border bg-card pl-4 pr-2 py-2 shadow-lg shadow-fg/5 transition duration-150 focus-within:border-accent/40 focus-within:ring-2 focus-within:ring-accent/15">
             <input
               type="text"
@@ -211,6 +280,25 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
               }
               className="flex-1 bg-transparent py-1.5 text-sm text-fg placeholder:text-fg-subtle outline-none disabled:text-fg-subtle disabled:placeholder:text-fg-subtle"
             />
+            {/* 隐藏 file input，由 📎 按钮触发 */}
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={handleAttachImages}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => imageInputRef.current?.click()}
+              disabled={!datasetId || isStreaming}
+              aria-label="附加图片"
+              title="附加图片（vision 多模态，需 vision-capable LLM）"
+              className="size-9 shrink-0 inline-flex items-center justify-center rounded-xl text-fg-muted transition duration-150 hover:bg-surface hover:text-fg active:scale-[0.94] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            >
+              <ImagePlus className="size-4" strokeWidth={1.75} />
+            </button>
             <button
               type="submit"
               disabled={!canSubmit}

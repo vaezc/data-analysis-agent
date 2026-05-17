@@ -51,7 +51,7 @@ export function FileUploader({ onUploaded }: FileUploaderProps) {
       <input
         ref={inputRef}
         type="file"
-        accept=".csv,.xlsx,.xls"
+        accept=".csv,.xlsx"
         className="hidden"
         onChange={(e) => {
           const file = e.target.files?.[0]

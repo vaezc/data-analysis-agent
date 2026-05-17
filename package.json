@@ -10,6 +10,9 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.10.0",
+    "exceljs": "^4.4.0",
     "lucide-react": "^1.14.0",
     "marked": "^18.0.3",
     "next": "16.2.6",
@@ -20,8 +23,7 @@
     "react-dom": "19.2.4",
     "react-markdown": "^10.1.0",
     "recharts": "^3.8.1",
-    "remark-gfm": "^4.0.1",
-    "xlsx": "^0.18.5"
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

@@ -33,8 +33,11 @@ interface UseAgentParams {
 
 interface UseAgentReturn {
   messages: ChatMessage[]
-  /** 发送一条用户消息并消费 Agent 的 SSE 响应 */
-  send: (text: string) => Promise<void>
+  /**
+   * 发送一条用户消息（可附图片）并消费 Agent 的 SSE 响应。
+   * images 是 data URL 数组（data:image/...;base64,...），需要 vision-capable LLM
+   */
+  send: (text: string, images?: string[]) => Promise<void>
   /** 是否正在接收 SSE 事件 */
   isStreaming: boolean
   /** 切换 dataset 后正在从 DB 加载历史。UI 据此显示骨架/控制滚动定位 */
@@ -128,7 +131,7 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
   }, [datasetId])
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, images?: string[]) => {
       const trimmed = text.trim()
       if (!trimmed) return
       if (!datasetId) {
@@ -138,13 +141,21 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
       if (isStreaming) return
 
       const assistantId = crypto.randomUUID()
+      const hasImages = images && images.length > 0
 
       // 立刻在 UI 显示用户消息 + 空 assistant 占位（带 spinner）
       // 注意：这里用的 user message id 是前端临时 UUID。
       // 刷新后从 DB 加载会替换成后端 UUID，对用户透明。
       setMessages((prev) => [
         ...prev,
-        { id: crypto.randomUUID(), role: 'user', content: trimmed },
+        hasImages
+          ? {
+              id: crypto.randomUUID(),
+              role: 'user',
+              content: trimmed,
+              images,
+            }
+          : { id: crypto.randomUUID(), role: 'user', content: trimmed },
         {
           id: assistantId,
           role: 'assistant',
@@ -165,7 +176,11 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           // 不再传 previousMessages —— 后端从 DB 加载历史
-          body: JSON.stringify({ datasetId, message: trimmed }),
+          body: JSON.stringify({
+            datasetId,
+            message: trimmed,
+            ...(hasImages ? { images } : {}),
+          }),
           signal: controller.signal,
         })
 

@@ -14,8 +14,8 @@
 //   deleteDataset()       删除（级联删除 messages，由外键 on delete cascade 完成）
 // ============================================================
 
+import ExcelJS from 'exceljs'
 import Papa from 'papaparse'
-import * as XLSX from 'xlsx'
 import { getSupabase } from '@/lib/supabase'
 import type {
   Column,
@@ -51,24 +51,41 @@ function parseCSV(text: string): RawTable {
   return { headers: headers.map(String), rows }
 }
 
-function parseExcel(buffer: Buffer): RawTable {
-  const wb = XLSX.read(buffer, { type: 'buffer' })
-  const firstSheetName = wb.SheetNames[0]
-  if (!firstSheetName) throw new Error('Excel 文件没有 sheet')
-  const sheet = wb.Sheets[firstSheetName]
-  // raw:false → 用 cell 的格式化字符串（保留前导零、日期可读形式）
-  // header:1 → 输出二维数组而不是 object
-  const data = XLSX.utils.sheet_to_json<string[]>(sheet, {
-    header: 1,
-    raw: false,
-    defval: '',
+async function parseExcel(buffer: Buffer): Promise<RawTable> {
+  // 改用 exceljs（活跃维护、npm 主源、无 CVE）。xlsx@0.18.x 有 CVE-2023-30533
+  // (prototype pollution) 和 CVE-2024-22363 (ReDoS)，后续版本只通过 SheetJS CDN
+  // 分发，不在 npm 上。exceljs 不支持二进制 .xls 格式，对应 ALLOWED_EXTS 调整。
+  //
+  // exceljs API 异步且行索引从 1 开始（[0] 总是 undefined，要跳过）。
+  const workbook = new ExcelJS.Workbook()
+  // exceljs 的 Buffer 类型定义与 @types/node 24+ 的 Buffer 类型冲突
+  // （ArrayBufferLike 泛型差异），运行时完全兼容，断言绕过即可
+  await workbook.xlsx.load(buffer as unknown as Parameters<typeof workbook.xlsx.load>[0])
+  const sheet = workbook.worksheets[0]
+  if (!sheet) throw new Error('Excel 文件没有 sheet')
+
+  const data: string[][] = []
+  sheet.eachRow({ includeEmpty: false }, (row) => {
+    // row.values 是 1-indexed 数组（[0] 是 undefined），切掉
+    const values = row.values as unknown as (
+      | string
+      | number
+      | boolean
+      | Date
+      | null
+      | undefined
+    )[]
+    const cells = values.slice(1).map((v) => {
+      if (v == null) return ''
+      if (v instanceof Date) return v.toISOString().slice(0, 10) // YYYY-MM-DD
+      return String(v)
+    })
+    data.push(cells)
   })
+
   if (data.length === 0) throw new Error('Excel 第一个 sheet 为空')
   const [headers, ...rows] = data
-  return {
-    headers: headers.map(String),
-    rows: rows.map((r) => r.map((cell) => (cell == null ? '' : String(cell)))),
-  }
+  return { headers, rows }
 }
 
 // ============================================================
@@ -159,10 +176,10 @@ export async function createDataset(
   let raw: RawTable
   if (ext === 'csv') {
     raw = parseCSV(buffer.toString('utf-8'))
-  } else if (ext === 'xlsx' || ext === 'xls') {
-    raw = parseExcel(buffer)
+  } else if (ext === 'xlsx') {
+    raw = await parseExcel(buffer)
   } else {
-    throw new Error(`不支持的文件类型：.${ext}（仅支持 csv / xlsx / xls）`)
+    throw new Error(`不支持的文件类型：.${ext}（仅支持 csv / xlsx）`)
   }
 
   const { headers, rows: rawRows } = raw
