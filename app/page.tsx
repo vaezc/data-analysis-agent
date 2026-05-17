@@ -1,5 +1,6 @@
 'use client'
 
+import { BarChart3, Loader2, Users } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { ThemeToggle } from '@/components/ui/ThemeToggle'
@@ -8,9 +9,32 @@ import {
   type UploadedDataset,
 } from '@/components/upload/FileUploader'
 
+interface DemoSpec {
+  filename: string
+  label: string
+  meta: string
+  icon: typeof BarChart3
+}
+
+const DEMOS: DemoSpec[] = [
+  {
+    filename: 'sales_demo.csv',
+    label: '销售数据',
+    meta: '45 行 · 6 月 × 3 区域 × 3 产品',
+    icon: BarChart3,
+  },
+  {
+    filename: 'employee_performance_demo.csv',
+    label: '员工绩效',
+    meta: '30 行 · 4 个部门',
+    icon: Users,
+  },
+]
+
 export default function Home() {
   const [datasets, setDatasets] = useState<UploadedDataset[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [loadingDemo, setLoadingDemo] = useState<string | null>(null)
 
   // 启动时从 Supabase 加载已上传的数据集列表（Phase 3 持久化）
   useEffect(() => {
@@ -31,6 +55,40 @@ export default function Home() {
   const handleUploaded = (ds: UploadedDataset) => {
     setDatasets((prev) => [ds, ...prev])
     setActiveId(ds.id)
+  }
+
+  /**
+   * 一键试用样例：fetch /public/demos/xxx.csv → 转 File → 走 /api/upload 标准流程。
+   * 重用现有上传链路，不破坏 dataset 创建的单一入口。
+   */
+  const handleLoadDemo = async (filename: string) => {
+    if (loadingDemo) return
+    setLoadingDemo(filename)
+    try {
+      const csvRes = await fetch(`/demos/${filename}`)
+      if (!csvRes.ok) throw new Error(`fetch demo failed: ${csvRes.status}`)
+      const blob = await csvRes.blob()
+      const file = new File([blob], filename, { type: 'text/csv' })
+
+      const formData = new FormData()
+      formData.append('file', file)
+      const uploadRes = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      })
+      if (!uploadRes.ok) {
+        const body = (await uploadRes.json().catch(() => ({}))) as {
+          error?: string
+        }
+        throw new Error(body.error ?? `HTTP ${uploadRes.status}`)
+      }
+      const ds = (await uploadRes.json()) as UploadedDataset
+      handleUploaded(ds)
+    } catch (e) {
+      console.error('Load demo failed:', e)
+    } finally {
+      setLoadingDemo(null)
+    }
   }
 
   const active = datasets.find((d) => d.id === activeId) ?? null
@@ -73,10 +131,42 @@ export default function Home() {
           </div>
 
           {datasets.length === 0 ? (
-            <div className="text-xs text-fg-subtle leading-relaxed">
-              上传 CSV / Excel 文件后
-              <br />
-              在这里管理
+            <div className="space-y-3">
+              <div className="text-xs text-fg-subtle leading-relaxed">
+                上传 CSV / Excel 文件，或试用样例：
+              </div>
+              <div className="space-y-1">
+                {DEMOS.map((demo) => {
+                  const isLoading = loadingDemo === demo.filename
+                  const Icon = demo.icon
+                  return (
+                    <button
+                      key={demo.filename}
+                      type="button"
+                      onClick={() => handleLoadDemo(demo.filename)}
+                      disabled={loadingDemo !== null}
+                      className="w-full text-left rounded-md px-3 py-2 transition duration-150 hover:bg-surface active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    >
+                      <div className="flex items-center gap-2">
+                        {isLoading ? (
+                          <Loader2 className="size-3.5 text-fg-muted animate-spin" />
+                        ) : (
+                          <Icon
+                            className="size-3.5 text-fg-muted"
+                            strokeWidth={1.75}
+                          />
+                        )}
+                        <div className="text-sm font-medium text-fg">
+                          {demo.label}
+                        </div>
+                      </div>
+                      <div className="text-[11px] text-fg-muted mt-0.5 pl-[22px] tabular-nums">
+                        {demo.meta}
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
             </div>
           ) : (
             <div className="space-y-1">
