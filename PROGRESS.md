@@ -58,23 +58,21 @@
 
 ## 3. 已知局限（按影响排序）
 
-### L1. `xlsx@0.18.5` 存在已知 CVE
+### L1. `xlsx@0.18.5` 存在已知 CVE ✅ 已解决（2026-05-17）
 
-- **风险**：CVE-2023-30533（prototype pollution）、CVE-2024-22363（ReDoS）
-- **影响**：仅在 Excel 解析路径，CSV 不受影响。Phase 1 单用户 demo 攻击面窄。
-- **解决**：Phase 3 上线前迁到 SheetJS CDN 版本或换 `exceljs`。
+- ~~CVE-2023-30533（prototype pollution）、CVE-2024-22363（ReDoS）~~
+- **解决方案**：换 `exceljs`（活跃维护、npm 主源、无 CVE）。改 `parseExcel` 用 ExcelJS API，async 化（exceljs 接口本身就是 async）。ALLOWED_EXTS 去掉 `.xls`（exceljs 不支持二进制 xls 格式，仅 xlsx OOXML）。
 
-### L2. `node:vm` 不是真正的安全沙箱
+### L2. `node:vm` 不是真正的安全沙箱 ✅ 已解决（2026-05-17）
 
-- **位置**：`lib/tools/executor.ts` 的 `runInSandbox`
-- **风险**：历史上有上下文逃逸 CVE；用户输入间接通过 LLM 进入 vm。
-- **缓解**：globals 白名单（无 process/require/setTimeout/Promise）、5s timeout。
-- **解决**：Phase 2 接 E2B 沙箱，替换 `execAnalysis` 一个函数即可。
+- ~~`lib/tools/executor.ts` 的 `runInSandbox`~~
+- ~~历史上有上下文逃逸 CVE；用户输入间接通过 LLM 进入 vm~~
+- **解决方案**：换 `better-sqlite3` (SQLite 内存数据库)。LLM 生成 SQL 而不是 JS，跑在 SQLite 引擎里——SQLite 是世界上最被审计过的 DB 之一，安全性远超 vm。三层防御：(1) 必须 SELECT/WITH 开头；(2) 拒绝 DDL/DML keyword 正则；(3) 每次 `:memory:` 新建 + 用完即销毁。`next.config.ts` 加 `serverExternalPackages: ['better-sqlite3']` 处理 native binding 部署。
 
-### L3. `vm` 不支持 async/Promise
+### L3. `vm` 不支持 async/Promise ✅ 已解决（2026-05-17）
 
-- **影响**：LLM 生成的 JS 不能用 await。当前不需要。
-- **解决**:Phase 2 E2B 解决（Python 异步本来就不同模型）。
+- ~~LLM 生成的 JS 不能用 await~~
+- **解决方案**：随 L2 一起，已迁移到 SQL。SQL 本身没有 async 概念。better-sqlite3 是同步 API。
 
 ### L4. Next.js dev 模式 HMR 会清空内存 Map ✅ 已解决（2026-05-17）
 
@@ -226,17 +224,24 @@
 - ✅ Vercel 部署
 - ⏳ 2~3 个 Demo 数据集 + 截图/GIF
 
-### 还可以做的扫尾
+### 2026-05-17 收尾完成清单
 
-1. **xlsx CVE 升级或替换**（L1）— 安全债，公网部署后越早越好
-2. **错误条 dismiss × 按钮** — 5 分钟，UX 必备
-3. **数据集删除** — 20 分钟，UX 必备
-4. **上传文件大小限制**（4.6）— 防 DoS
-5. **滑动窗口 + New Chat 按钮** — 长对话上下文管理
-6. **Demo 数据集 + 一键试用按钮** — 降低试用门槛
+- ✅ 错误条 dismiss × 按钮
+- ✅ 数据集删除按钮（sidebar hover）
+- ✅ New Chat 按钮（清空对话历史）
+- ✅ 上传文件大小限制（20MB）
+- ✅ Demo 数据集 + 一键试用按钮
+- ✅ xlsx → exceljs（解 L1）
+- ✅ 滑动窗口（loadConversation 限制最近 40 条 messages，约 20 轮）
+- ✅ better-sqlite3 替换 node:vm 沙箱（解 L2 + L3，run_analysis 改跑 SQL）
+- ✅ Vision 多模态架构（user message 支持 images，OpenAI multimodal 协议，**注：实际启用需要 vision-capable LLM 如 gpt-4o**）
 
-### 推荐下一步
+### 剩余可选项（真正的 nice-to-have）
 
-随便挑：扫尾代码 / 准备 Demo 物料（截图 GIF README）/ Vision 多模态创新点 / DuckDB-WASM 替换 vm。
+1. **E2B 沙箱**：需要付费 API key 才能测试，跳过
+2. **二次 LLM 缓存**（L10）：高频重复 query 才有价值
+3. **多 Excel sheet 支持**：当前只读第一个 sheet
+4. **可观测性**：耗时、token 数、失败率监控
+5. **DuckDB**：比 SQLite 更强的 OLAP 能力（但包体积爆 Vercel hobby 50MB 限制）
 
-底线：项目主体功能已完整可用。
+底线：**项目已完整可用**，所有"必做"和"应该做"都已落地。
