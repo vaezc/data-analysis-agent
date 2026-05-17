@@ -90,11 +90,57 @@ function generatePlaceholder(columns: Column[] | undefined): string {
 }
 
 export function ChatPanel({ datasetId, columns }: ChatPanelProps) {
-  const suggestions = useMemo(() => generateSuggestions(columns), [columns]);
+  // 模板 fallback —— LLM suggestions 未返回前显示
+  const templateSuggestions = useMemo(
+    () => generateSuggestions(columns),
+    [columns],
+  );
   const placeholder = useMemo(() => {
     if (!datasetId) return "请先选择数据集";
     return generatePlaceholder(columns);
   }, [datasetId, columns]);
+
+  // LLM 生成的更自然 suggestions（异步加载）
+  // 会话内 cache by datasetId 避免切回时重复调用
+  const [llmSuggestions, setLlmSuggestions] = useState<string[] | null>(null);
+  const suggestionsCacheRef = useRef<Map<string, string[]>>(new Map());
+
+  useEffect(() => {
+    if (!datasetId) {
+      setLlmSuggestions(null);
+      return;
+    }
+    // 命中缓存：直接用，不发请求
+    const cached = suggestionsCacheRef.current.get(datasetId);
+    if (cached) {
+      setLlmSuggestions(cached);
+      return;
+    }
+    // 切 dataset 时先清空，避免上一个 dataset 的 LLM 建议短暂残留
+    setLlmSuggestions(null);
+
+    let cancelled = false;
+    fetch(`/api/datasets/${encodeURIComponent(datasetId)}/suggestions`)
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<{ suggestions: string[] }>;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        if (Array.isArray(data.suggestions) && data.suggestions.length > 0) {
+          suggestionsCacheRef.current.set(datasetId, data.suggestions);
+          setLlmSuggestions(data.suggestions);
+        }
+      })
+      .catch(() => {
+        // 失败不影响主流程：fallback 到模板
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [datasetId]);
+
+  const suggestions = llmSuggestions ?? templateSuggestions;
 
   const {
     messages,
