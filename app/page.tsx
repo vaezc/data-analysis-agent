@@ -264,7 +264,7 @@ export default function Home() {
           )}
         </header>
 
-        <ChatPanel datasetId={activeId} />
+        <ChatPanel datasetId={activeId} columns={active?.columns} />
       </main>
     </div>
   )

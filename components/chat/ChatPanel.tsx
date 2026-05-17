@@ -1,36 +1,101 @@
 "use client";
 
-import {
-  Database,
-  ImagePlus,
-  Loader2,
-  RotateCcw,
-  Send,
-  Sparkles,
-  X,
-} from "lucide-react";
+import { Database, Loader2, RotateCcw, Send, Sparkles, X } from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
-  type ChangeEvent,
   type FormEvent,
 } from "react";
 import { useAgent } from "@/hooks/use-agent";
+import type { Column } from "@/types";
 import { MessageBubble } from "./MessageBubble";
-
-const EXAMPLE_QUESTIONS = [
-  "哪个区域销售额最高？",
-  "按月份统计销售趋势",
-  "不同产品的平均售价",
-];
 
 interface ChatPanelProps {
   datasetId: string | null;
+  /** 当前激活数据集的列 schema —— 用于动态生成示例问题 + 输入框 placeholder */
+  columns?: Column[];
 }
 
-export function ChatPanel({ datasetId }: ChatPanelProps) {
+// ============================================================
+// 动态提示生成：根据 columns 的类型组合套模板，生成 2~3 个有针对性的问题
+//
+// 不调 LLM（即时、无网络成本、不烧 token）。模板覆盖三种典型分析场景：
+//   1. 分类对比：string × number → "哪个 X 的 Y 最高"
+//   2. 时间趋势：date × number → "按 X 看 Y 的趋势"
+//   3. 单变量统计：number → "X 的统计指标"
+// ============================================================
+
+const DEFAULT_SUGGESTIONS = [
+  "这份数据一共有多少行？",
+  "每列分别是什么类型？",
+  "数据里有缺失值吗？",
+];
+
+function generateSuggestions(columns: Column[] | undefined): string[] {
+  if (!columns || columns.length === 0) return DEFAULT_SUGGESTIONS;
+
+  const numCols = columns.filter((c) => c.type === "number");
+  const strCols = columns.filter((c) => c.type === "string");
+  const dateCols = columns.filter((c) => c.type === "date");
+
+  const out: string[] = [];
+
+  // 分类对比
+  if (strCols.length > 0 && numCols.length > 0) {
+    out.push(`哪个 ${strCols[0].name} 的 ${numCols[0].name} 最高？`);
+  }
+
+  // 时间趋势 / 二级分组
+  if (dateCols.length > 0 && numCols.length > 0) {
+    out.push(`按 ${dateCols[0].name} 看 ${numCols[0].name} 的变化趋势`);
+  } else if (strCols.length > 1 && numCols.length > 0) {
+    out.push(`按 ${strCols[1].name} 分组统计 ${numCols[0].name} 的总和`);
+  }
+
+  // 单变量统计
+  if (numCols.length > 0) {
+    out.push(`${numCols[0].name} 的平均值、最大值、最小值分别是多少？`);
+  } else if (strCols.length > 0) {
+    out.push(`${strCols[0].name} 有哪些不同的取值？`);
+  }
+
+  // 兜底凑齐 3 条（避免列结构极简时只显示 1~2 条建议）
+  const fallbacks = DEFAULT_SUGGESTIONS;
+  let idx = 0;
+  while (out.length < 3 && idx < fallbacks.length) {
+    if (!out.includes(fallbacks[idx])) out.push(fallbacks[idx]);
+    idx++;
+  }
+
+  return out.slice(0, 3);
+}
+
+function generatePlaceholder(columns: Column[] | undefined): string {
+  if (!columns || columns.length === 0) {
+    return "提个问题，让 Agent 帮你分析这份数据";
+  }
+  const numCols = columns.filter((c) => c.type === "number");
+  const strCols = columns.filter((c) => c.type === "string");
+
+  if (strCols.length > 0 && numCols.length > 0) {
+    return `例如：哪个 ${strCols[0].name} 的 ${numCols[0].name} 最高？`;
+  }
+  if (numCols.length > 0) {
+    return `例如：${numCols[0].name} 的平均值是多少？`;
+  }
+  return "提个问题，让 Agent 帮你分析这份数据";
+}
+
+export function ChatPanel({ datasetId, columns }: ChatPanelProps) {
+  const suggestions = useMemo(() => generateSuggestions(columns), [columns]);
+  const placeholder = useMemo(() => {
+    if (!datasetId) return "请先选择数据集";
+    return generatePlaceholder(columns);
+  }, [datasetId, columns]);
+
   const {
     messages,
     send,
@@ -125,52 +190,17 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
     }
   }, [messages, isLoadingHistory]);
 
-  // Vision multimodal：附加图片（data URL 数组）
-  const [attachedImages, setAttachedImages] = useState<string[]>([]);
-  const imageInputRef = useRef<HTMLInputElement>(null);
-
-  const handleAttachImages = async (e: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? []);
-    if (files.length === 0) return;
-
-    // 单张图上限 4MB（base64 后 ~5.3MB；Vercel body 上限 4.5MB，控制保守）
-    const MAX_SIZE = 4 * 1024 * 1024;
-    const valid = files.filter((f) => {
-      if (!f.type.startsWith("image/")) return false;
-      if (f.size > MAX_SIZE) return false;
-      return true;
-    });
-
-    const dataUrls = await Promise.all(
-      valid.map(
-        (f) =>
-          new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.onerror = () => reject(reader.error);
-            reader.readAsDataURL(f);
-          }),
-      ),
-    );
-    setAttachedImages((prev) => [...prev, ...dataUrls]);
-
-    // 重置 input 以便能选同一张图（onChange 才会触发）
-    if (imageInputRef.current) imageInputRef.current.value = "";
-  };
-
-  const removeAttachedImage = (idx: number) => {
-    setAttachedImages((prev) => prev.filter((_, i) => i !== idx));
-  };
+  // Vision multimodal 前端 UI 暂时下线（DeepSeek 当前 chat completions 不支持
+  // image_url；切到 vision-capable LLM 如 gpt-4o 时再恢复）。
+  // 后端协议层（types / agent.ts / messages-store.ts / /api/agent）仍支持
+  // images 字段，历史消息中已有图片仍能正常显示。
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const text = input.trim();
     if (!text) return;
-    const imagesToSend =
-      attachedImages.length > 0 ? attachedImages : undefined;
     setInput("");
-    setAttachedImages([]);
-    await send(text, imagesToSend);
+    await send(text);
   };
 
   const canSubmit =
@@ -200,7 +230,11 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
           {isLoadingHistory ? (
             <HistorySkeleton />
           ) : messages.length === 0 ? (
-            <EmptyState datasetId={datasetId} onPick={(q) => setInput(q)} />
+            <EmptyState
+              datasetId={datasetId}
+              suggestions={suggestions}
+              onPick={(q) => setInput(q)}
+            />
           ) : (
             messages.map((m, i) => (
               <MessageBubble
@@ -240,65 +274,15 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
           onSubmit={handleSubmit}
           className="mx-auto max-w-3xl px-6 pt-2 pb-4"
         >
-          {/* 附加图片预览：每张缩略图 + × 删除 */}
-          {attachedImages.length > 0 && (
-            <div className="mb-2 flex flex-wrap gap-2">
-              {attachedImages.map((url, idx) => (
-                <div
-                  key={idx}
-                  className="relative size-16 overflow-hidden rounded-lg border border-border bg-surface"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={url}
-                    alt={`附件 ${idx + 1}`}
-                    className="size-full object-cover"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => removeAttachedImage(idx)}
-                    aria-label="移除图片"
-                    className="absolute right-0.5 top-0.5 inline-flex size-5 items-center justify-center rounded-full bg-bg/80 text-fg shadow-sm transition duration-150 hover:bg-danger hover:text-accent-fg"
-                  >
-                    <X className="size-3" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
           <div className="flex items-center gap-2 rounded-2xl border border-border bg-card pl-4 pr-2 py-2 shadow-lg shadow-fg/5 transition duration-150 focus-within:border-accent/40 focus-within:ring-2 focus-within:ring-accent/15">
             <input
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               disabled={!datasetId}
-              placeholder={
-                datasetId
-                  ? "提个问题，例如：哪个区域销售额最高？"
-                  : "请先选择数据集"
-              }
+              placeholder={placeholder}
               className="flex-1 bg-transparent py-1.5 text-sm text-fg placeholder:text-fg-subtle outline-none disabled:text-fg-subtle disabled:placeholder:text-fg-subtle"
             />
-            {/* 隐藏 file input，由 📎 按钮触发 */}
-            <input
-              ref={imageInputRef}
-              type="file"
-              accept="image/*"
-              multiple
-              onChange={handleAttachImages}
-              className="hidden"
-            />
-            <button
-              type="button"
-              onClick={() => imageInputRef.current?.click()}
-              disabled={!datasetId || isStreaming}
-              aria-label="附加图片"
-              title="附加图片（vision 多模态，需 vision-capable LLM）"
-              className="size-9 shrink-0 inline-flex items-center justify-center rounded-xl text-fg-muted transition duration-150 hover:bg-surface hover:text-fg active:scale-[0.94] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-            >
-              <ImagePlus className="size-4" strokeWidth={1.75} />
-            </button>
             <button
               type="submit"
               disabled={!canSubmit}
@@ -320,9 +304,11 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
 
 function EmptyState({
   datasetId,
+  suggestions,
   onPick,
 }: {
   datasetId: string | null;
+  suggestions: string[];
   onPick: (q: string) => void;
 }) {
   if (!datasetId) {
@@ -350,7 +336,7 @@ function EmptyState({
         提个问题，Agent 会自动调用工具完成多步分析
       </div>
       <div className="mt-7 flex flex-wrap justify-center gap-2">
-        {EXAMPLE_QUESTIONS.map((q) => (
+        {suggestions.map((q) => (
           <button
             key={q}
             type="button"
