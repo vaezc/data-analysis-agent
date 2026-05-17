@@ -6,6 +6,12 @@
 // 响应：text/event-stream，每条事件格式
 //   data: <StreamEvent JSON>\n\n
 //
+// Phase 3 改造（持久化）：
+//   - 不再从 body 读 previousMessages —— 后端自己从 DB 加载
+//   - 进入 agent 前立刻 insert user message（即使 agent 挂掉用户消息也保留）
+//   - 流过程中用 reducer 累积 assistant ChatMessage 状态
+//   - 流结束在 finally 中保存 assistant message 到 DB
+//
 // 设计要点：
 //   - 用标准 ReadableStream + TextEncoder，不依赖额外库
 //   - runAgent 内部已 try/catch 并通过 emit 推 error 事件；外层 try 是防御性
@@ -16,7 +22,12 @@
 import { type NextRequest, NextResponse } from 'next/server'
 import { runAgent } from '@/lib/agent'
 import type { ChatCompletionMessageParam } from '@/lib/llm'
-import type { StreamEvent } from '@/types'
+import {
+  loadConversation,
+  saveAssistantMessage,
+  saveUserMessage,
+} from '@/lib/messages-store'
+import type { AgentStep, ChatMessage, StreamEvent } from '@/types'
 
 export const runtime = 'nodejs'
 // Vercel serverless 默认 timeout：Hobby 10s / Pro 60s / Fluid 800s。
@@ -58,24 +69,50 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     )
   }
+  const userText = message.trim()
 
-  // previousMessages 来自前端 llmHistory，前端把它当黑盒原样回传。
-  // 这里只校验是数组（合法即可），不解构内部 — 由 runAgent 转给 LLM。
-  const rawHistory = body.previousMessages
-  if (rawHistory !== undefined && !Array.isArray(rawHistory)) {
+  // ---------- 2. 加载历史 + 入库用户消息 ----------
+  let previousMessages: ChatCompletionMessageParam[] = []
+  try {
+    const conv = await loadConversation(datasetId)
+    previousMessages = conv.llmMessages
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
     return NextResponse.json(
-      { error: 'previousMessages 必须是数组', code: 'INVALID_HISTORY' },
-      { status: 400 },
+      { error: `加载历史失败：${msg}`, code: 'LOAD_HISTORY_FAILED' },
+      { status: 500 },
     )
   }
-  const previousMessages = (rawHistory ?? []) as ChatCompletionMessageParam[]
 
-  // ---------- 2. 构造 SSE 流 ----------
+  try {
+    await saveUserMessage(datasetId, userText)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return NextResponse.json(
+      { error: `保存用户消息失败：${msg}`, code: 'SAVE_USER_FAILED' },
+      { status: 500 },
+    )
+  }
+
+  // ---------- 3. 构造 SSE 流 + 累积 assistant 状态 ----------
   const encoder = new TextEncoder()
+
+  // 累积本轮 assistant 的 UI 状态（SSE 流结束后写入 DB）
+  const assistant: ChatMessage = {
+    id: crypto.randomUUID(),
+    role: 'assistant',
+    steps: [],
+    charts: [],
+    reports: [],
+    content: '',
+  }
+  // 累积本轮新增的 LLM messages（done 事件携带）
+  let newLlmMessages: ChatCompletionMessageParam[] = []
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const emit = (event: StreamEvent) => {
+        // 1. 推给前端
         try {
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
@@ -83,12 +120,21 @@ export async function POST(req: NextRequest) {
         } catch {
           // 客户端已断开，controller 已关闭。忽略即可。
         }
+        // 2. 累积 assistant 状态（用于 DB 持久化）
+        applyEventToAssistant(assistant, event)
+        if (event.type === 'done') {
+          // runAgent 的 done.messages 切片含 user + assistant + tool 序列
+          // user 消息我们已经单独保存了（saveUserMessage），这里把它跳过
+          newLlmMessages = (event.messages as ChatCompletionMessageParam[]).filter(
+            (m) => m.role !== 'user',
+          )
+        }
       }
 
       try {
         await runAgent({
           datasetId,
-          userMessage: message,
+          userMessage: userText,
           previousMessages,
           onEvent: emit,
         })
@@ -97,6 +143,21 @@ export async function POST(req: NextRequest) {
         const msg = e instanceof Error ? e.message : String(e)
         emit({ type: 'error', message: `Agent 流错误：${msg}` })
       } finally {
+        // 保存 assistant message —— 即使流出错也要存（包含已经产生的部分 state）
+        // 但完全空的 assistant（一个 event 都没收到）不存
+        if (
+          assistant.content ||
+          assistant.steps.length > 0 ||
+          assistant.charts.length > 0 ||
+          assistant.reports.length > 0
+        ) {
+          try {
+            await saveAssistantMessage(datasetId, assistant, newLlmMessages)
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            emit({ type: 'error', message: `保存对话失败：${msg}` })
+          }
+        }
         try {
           controller.close()
         } catch {
@@ -115,6 +176,68 @@ export async function POST(req: NextRequest) {
       'X-Accel-Buffering': 'no',
     },
   })
+}
+
+// ============================================================
+// SSE event → assistant ChatMessage reducer
+//
+// 与前端 hooks/use-agent.ts 的 applyEventToAssistant 同源逻辑。
+// 服务端这一份用于在写库前累积出完整的 UI 形态。
+// 直接 mutate 入参（性能 + 简单）。
+// ============================================================
+
+function applyEventToAssistant(
+  msg: ChatMessage & { role: 'assistant' },
+  event: StreamEvent,
+): void {
+  if (msg.role !== 'assistant') return
+
+  switch (event.type) {
+    case 'tool_start': {
+      const step: AgentStep = {
+        tool: event.tool,
+        description: event.description,
+        status: 'running',
+      }
+      msg.steps.push(step)
+      // 清空 content：流式时中间 turn 可能有"我先看下数据"之类的文字
+      msg.content = ''
+      return
+    }
+    case 'tool_done': {
+      for (let i = msg.steps.length - 1; i >= 0; i--) {
+        if (msg.steps[i].tool === event.tool && msg.steps[i].status === 'running') {
+          msg.steps[i].status = 'done'
+          return
+        }
+      }
+      return
+    }
+    case 'chart':
+      msg.charts.push(event.chart)
+      return
+    case 'report':
+      msg.reports.push(event.report)
+      return
+    case 'answer_delta':
+      msg.content += event.text
+      return
+    case 'answer':
+      msg.content = event.text
+      return
+    case 'error': {
+      for (let i = msg.steps.length - 1; i >= 0; i--) {
+        if (msg.steps[i].status === 'running') {
+          msg.steps[i].status = 'error'
+          return
+        }
+      }
+      return
+    }
+    case 'done':
+      // 由外层捕获 newLlmMessages，这里不动 UI 状态
+      return
+  }
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {

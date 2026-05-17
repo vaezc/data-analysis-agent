@@ -1,19 +1,22 @@
 // ============================================================
 // 数据集存储与解析
 //
-// Phase 1：内存 Map，进程重启即丢。
-// Phase 2/3：替换实现为 Supabase；保持 public API 签名不变即可。
+// 解析逻辑（CSV/Excel 解析 + 列类型推断 + 值转换）保留不变。
+// 存储改用 Supabase（Phase 3）：
+//   - 解决 Vercel Serverless 跨函数内存隔离问题
+//   - 支持刷新页面 / 多 tab / 跨设备访问历史 dataset
 //
-// 公开 API：
-//   createDataset()       上传文件 → 解析 → 推断类型 → 入库
+// 公开 API（全部异步）：
+//   createDataset()       上传 → 解析 → 入 Supabase datasets 表
 //   getDataset()          完整数据（含 rows）
 //   getDatasetSummary()   inspect_data 工具的返回结构
 //   listDatasets()        前端侧边栏用，不含 rows
+//   deleteDataset()       删除（级联删除 messages，由外键 on delete cascade 完成）
 // ============================================================
 
-import { randomUUID } from 'node:crypto'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
+import { getSupabase } from '@/lib/supabase'
 import type {
   Column,
   ColumnType,
@@ -22,11 +25,9 @@ import type {
   Row,
 } from '@/types'
 
-// ---------- 存储 ----------
-
-const store = new Map<string, Dataset>()
-
-// ---------- 解析：文件 → 二维字符串数组 + headers ----------
+// ============================================================
+// 解析：文件 → 二维字符串数组 + headers
+// ============================================================
 
 interface RawTable {
   headers: string[]
@@ -70,7 +71,9 @@ function parseExcel(buffer: Buffer): RawTable {
   }
 }
 
-// ---------- 类型推断 ----------
+// ============================================================
+// 类型推断
+// ============================================================
 
 const DATE_REGEX =
   /^\d{4}[-/]\d{1,2}[-/]\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?$|^\d{1,2}[-/]\d{1,2}[-/]\d{4}$/
@@ -116,15 +119,42 @@ function coerceValue(value: string, type: ColumnType): unknown {
   }
 }
 
-// ---------- 公开 API ----------
+// ============================================================
+// Supabase 表行 ↔ Dataset 转换
+//
+// DB 字段命名（snake_case）→ TS（camelCase）；created_at（ISO string）→ ms timestamp
+// ============================================================
+
+interface DatasetRow {
+  id: string
+  name: string
+  columns: Column[]
+  rows: Row[]
+  row_count: number
+  created_at: string
+}
+
+function rowToDataset(row: DatasetRow): Dataset {
+  return {
+    id: row.id,
+    name: row.name,
+    columns: row.columns,
+    rows: row.rows,
+    createdAt: new Date(row.created_at).getTime(),
+  }
+}
+
+// ============================================================
+// 公开 API
+// ============================================================
 
 /**
  * 解析上传的文件并入库。filename 用来判断 CSV/Excel 与展示。
  */
-export function createDataset(
+export async function createDataset(
   filename: string,
   buffer: Buffer,
-): Dataset {
+): Promise<Dataset> {
   const ext = filename.toLowerCase().split('.').pop()
   let raw: RawTable
   if (ext === 'csv') {
@@ -155,49 +185,92 @@ export function createDataset(
     return row
   })
 
-  const dataset: Dataset = {
-    id: randomUUID(),
-    name: filename,
-    columns,
-    rows,
-    createdAt: Date.now(),
-  }
-  store.set(dataset.id, dataset)
-  return dataset
+  const supabase = getSupabase()
+  const { data, error } = await supabase
+    .from('datasets')
+    .insert({
+      name: filename,
+      columns,
+      rows,
+      row_count: rows.length,
+    })
+    .select('*')
+    .single<DatasetRow>()
+
+  if (error) throw new Error(`保存数据集失败：${error.message}`)
+  return rowToDataset(data)
 }
 
-export function getDataset(id: string): Dataset | undefined {
-  return store.get(id)
+export async function getDataset(id: string): Promise<Dataset | undefined> {
+  const supabase = getSupabase()
+  const { data, error } = await supabase
+    .from('datasets')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle<DatasetRow>()
+
+  if (error) throw new Error(`查询数据集失败：${error.message}`)
+  if (!data) return undefined
+  return rowToDataset(data)
 }
 
-export function getDatasetSummary(id: string): DatasetSummary | undefined {
-  const ds = store.get(id)
-  if (!ds) return undefined
+export async function getDatasetSummary(
+  id: string,
+): Promise<DatasetSummary | undefined> {
+  // 只取必要字段；sampleRows 用 JSONB 切片函数从 rows 取前 3 个，避免拉全量
+  // Supabase 不支持直接的 JSONB 片段查询，所以仍拉 rows 后在内存切。
+  // 单表 1GB JSONB 上限，几千行 dataset 量级查询毫秒级，可接受。
+  const supabase = getSupabase()
+  const { data, error } = await supabase
+    .from('datasets')
+    .select('id, name, columns, rows, row_count')
+    .eq('id', id)
+    .maybeSingle<Pick<DatasetRow, 'id' | 'name' | 'columns' | 'rows' | 'row_count'>>()
+
+  if (error) throw new Error(`查询数据集失败：${error.message}`)
+  if (!data) return undefined
   return {
-    dataset_id: ds.id,
-    name: ds.name,
-    columns: ds.columns,
-    rowCount: ds.rows.length,
-    sampleRows: ds.rows.slice(0, 3),
+    dataset_id: data.id,
+    name: data.name,
+    columns: data.columns,
+    rowCount: data.row_count,
+    sampleRows: data.rows.slice(0, 3),
   }
 }
 
+/**
+ * 数据集元信息（不含 rows）。与前端 UploadedDataset 形态对齐，
+ * 同时被 /api/upload 响应和 /api/datasets GET 复用。
+ */
 export interface DatasetMeta {
   id: string
   name: string
+  columns: Column[]
   rowCount: number
-  columnCount: number
   createdAt: number
 }
 
-export function listDatasets(): DatasetMeta[] {
-  return Array.from(store.values())
-    .map((ds) => ({
-      id: ds.id,
-      name: ds.name,
-      rowCount: ds.rows.length,
-      columnCount: ds.columns.length,
-      createdAt: ds.createdAt,
-    }))
-    .sort((a, b) => b.createdAt - a.createdAt)
+export async function listDatasets(): Promise<DatasetMeta[]> {
+  const supabase = getSupabase()
+  const { data, error } = await supabase
+    .from('datasets')
+    .select('id, name, columns, row_count, created_at')
+    .order('created_at', { ascending: false })
+
+  if (error) throw new Error(`列举数据集失败：${error.message}`)
+
+  type ListRow = Pick<DatasetRow, 'id' | 'name' | 'columns' | 'row_count' | 'created_at'>
+  return (data as ListRow[]).map((row) => ({
+    id: row.id,
+    name: row.name,
+    columns: row.columns,
+    rowCount: row.row_count,
+    createdAt: new Date(row.created_at).getTime(),
+  }))
+}
+
+export async function deleteDataset(id: string): Promise<void> {
+  const supabase = getSupabase()
+  const { error } = await supabase.from('datasets').delete().eq('id', id)
+  if (error) throw new Error(`删除数据集失败：${error.message}`)
 }

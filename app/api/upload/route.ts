@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer())
-    const dataset = createDataset(file.name, buffer)
+    const dataset = await createDataset(file.name, buffer)
 
     return NextResponse.json({
       id: dataset.id,

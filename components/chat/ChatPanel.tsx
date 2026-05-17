@@ -1,7 +1,13 @@
 "use client";
 
 import { Database, Loader2, Send, Sparkles } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { useAgent } from "@/hooks/use-agent";
 import { MessageBubble } from "./MessageBubble";
 
@@ -16,7 +22,9 @@ interface ChatPanelProps {
 }
 
 export function ChatPanel({ datasetId }: ChatPanelProps) {
-  const { messages, send, isStreaming, error } = useAgent({ datasetId });
+  const { messages, send, isStreaming, isLoadingHistory, error } = useAgent({
+    datasetId,
+  });
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   // sticky 状态：用户当前是否"贴底"。新内容来时只在此状态为 true 才跟随。
@@ -24,6 +32,8 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
   const stickyRef = useRef(true);
   // 跟踪上一帧 messages 数量：区分"新消息"和"流式更新"两种场景
   const prevCountRef = useRef(messages.length);
+  // 跟踪上一帧 isLoadingHistory：检测 true→false 的转换（=刚加载完历史的瞬间）
+  const prevLoadingRef = useRef(false);
 
   // 监听用户滚动位置，维护 sticky 状态。
   // 阈值 60px：留点容差处理浏览器渲染细节（行高、padding 等）
@@ -38,14 +48,37 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
 
-  // 滚动策略：
-  //   - 新消息（length 增加）→ smooth 滚动到底部，视觉自然
-  //   - 流式更新（同一条 assistant message 在变）→ 仅在 sticky 为 true 时瞬时跟随，
-  //     避免动画排队；用户主动上翻后 sticky 转 false，流式不再打扰
-  useEffect(() => {
+  // 滚动策略（三种场景区分）：
+  //   1. 切换 dataset 加载完历史（isLoadingHistory: true→false）
+  //      → useLayoutEffect 同步瞬时定位到底，浏览器不会 paint 顶部那一帧
+  //   2. 用户发新消息（messages.length 增加）
+  //      → smooth 滚动，视觉自然
+  //   3. 流式更新（同一条 assistant message 在变，length 不变）
+  //      → 仅在 sticky 为 true 时瞬时跟随，避免动画排队
+  //
+  // 关键：场景 1 用 useLayoutEffect 是为了让 scrollTop 设置在浏览器 paint 之前完成，
+  // 用户视觉上直接看到内容"已经在底部"，没有"从顶部滚下来"的动画感
+  useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
 
+    const justFinishedLoading = prevLoadingRef.current && !isLoadingHistory;
+    prevLoadingRef.current = isLoadingHistory;
+
+    if (isLoadingHistory) {
+      // 加载中：不动滚动
+      return;
+    }
+
+    if (justFinishedLoading) {
+      // 刚加载完历史：瞬时定位到底（不 smooth），同时重置 sticky 状态
+      el.scrollTop = el.scrollHeight;
+      stickyRef.current = true;
+      prevCountRef.current = messages.length;
+      return;
+    }
+
+    // 后续：新消息 smooth，流式瞬时
     const isNewMessage = messages.length > prevCountRef.current;
     prevCountRef.current = messages.length;
 
@@ -57,7 +90,7 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
     if (stickyRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, isLoadingHistory]);
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -74,7 +107,9 @@ export function ChatPanel({ datasetId }: ChatPanelProps) {
     <div className="flex-1 flex flex-col min-h-0">
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl px-6 py-8 space-y-6">
-          {messages.length === 0 ? (
+          {isLoadingHistory ? (
+            <HistorySkeleton />
+          ) : messages.length === 0 ? (
             <EmptyState datasetId={datasetId} onPick={(q) => setInput(q)} />
           ) : (
             messages.map((m, i) => (
@@ -181,6 +216,35 @@ function EmptyState({
             {q}
           </button>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// 历史加载骨架：切换 dataset 时占位，避免空白闪烁 / EmptyState 误导
+//
+// 设计原则：
+//   - 形态贴近真实对话气泡（user 右气泡 + assistant 左气泡 + 头像）
+//   - 用 bg-surface（语义 token，明暗主题自动跟随）
+//   - animate-pulse 提示"加载中"
+//   - 渲染 1 对（user + assistant），数量适中：太多假数据有戏精感，太少又像 bug
+// ============================================================
+function HistorySkeleton() {
+  return (
+    <div className="space-y-6" aria-busy="true" aria-label="加载对话历史">
+      {/* user bubble skeleton */}
+      <div className="flex justify-end">
+        <div className="h-10 w-56 rounded-2xl rounded-br-sm bg-surface animate-pulse" />
+      </div>
+      {/* assistant bubble skeleton (头像 + 内容) */}
+      <div className="flex gap-3">
+        <div className="size-8 shrink-0 rounded-full bg-surface animate-pulse" />
+        <div className="flex-1 space-y-2.5">
+          <div className="h-4 w-3/4 rounded bg-surface animate-pulse" />
+          <div className="h-4 w-1/2 rounded bg-surface animate-pulse" />
+          <div className="h-4 w-5/6 rounded bg-surface animate-pulse" />
+        </div>
       </div>
     </div>
   );

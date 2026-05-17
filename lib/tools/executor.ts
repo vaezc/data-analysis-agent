@@ -43,7 +43,7 @@ export async function executeTool(
   try {
     switch (toolName) {
       case 'inspect_data':
-        return JSON.stringify(execInspect(args))
+        return JSON.stringify(await execInspect(args))
       case 'run_analysis':
         return JSON.stringify(await execAnalysis(args))
       case 'create_chart':
@@ -80,10 +80,10 @@ function asString(args: Record<string, unknown>, key: string): string {
 // inspect_data
 // ============================================================
 
-function execInspect(rawArgs: unknown) {
+async function execInspect(rawArgs: unknown) {
   const args = asObject(rawArgs)
   const id = asString(args, 'dataset_id')
-  const summary = getDatasetSummary(id)
+  const summary = await getDatasetSummary(id)
   if (!summary) throw new Error(`数据集不存在：${id}`)
   return summary
 }
@@ -126,7 +126,7 @@ async function execAnalysis(rawArgs: unknown): Promise<AnalysisResult> {
   const intent = asString(args, 'intent')
   const description = asString(args, 'description')
 
-  const ds = getDataset(datasetId)
+  const ds = await getDataset(datasetId)
   if (!ds) throw new Error(`数据集不存在：${datasetId}`)
 
   const code = await generateAnalysisCode(ds.columns, ds.rows.slice(0, 2), intent)

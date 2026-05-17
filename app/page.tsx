@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { ThemeToggle } from '@/components/ui/ThemeToggle'
 import {
@@ -11,6 +11,22 @@ import {
 export default function Home() {
   const [datasets, setDatasets] = useState<UploadedDataset[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
+
+  // 启动时从 Supabase 加载已上传的数据集列表（Phase 3 持久化）
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/datasets')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: UploadedDataset[]) => {
+        if (!cancelled) setDatasets(data)
+      })
+      .catch(() => {
+        // 加载失败不致命：用户仍可上传新数据集
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const handleUploaded = (ds: UploadedDataset) => {
     setDatasets((prev) => [ds, ...prev])

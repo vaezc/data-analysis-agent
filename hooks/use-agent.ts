@@ -7,6 +7,12 @@
 //   const { messages, send, isStreaming, error, reset } = useAgent({ datasetId })
 //   await send('哪个区域销售额最高？')
 //
+// Phase 3 改造（持久化）：
+//   - 切换 datasetId 时 → GET /api/messages 加载历史
+//   - 不再前端持有 llmHistory（之前的 llmHistoryRef + storeRef Map 模式）
+//   - send 时不传 previousMessages —— 后端自己从 DB 加载
+//   - done 事件前端不再 append history —— 后端已经保存
+//
 // 实现要点：
 //   - POST 不能用 EventSource，用 fetch + ReadableStream.getReader 手动读
 //   - TextDecoder 必须传 stream:true，否则 UTF-8 多字节字符被切断会乱码
@@ -20,12 +26,6 @@ import type { AgentStep, ChatMessage, StreamEvent } from '@/types'
 
 type AssistantMessage = Extract<ChatMessage, { role: 'assistant' }>
 
-/** 每个数据集的对话存档（UI 消息 + LLM 黑盒历史） */
-interface DatasetHistory {
-  messages: ChatMessage[]
-  llmHistory: unknown[]
-}
-
 interface UseAgentParams {
   /** 当前激活的数据集 ID；为 null 时 send 会报错 */
   datasetId: string | null
@@ -37,30 +37,64 @@ interface UseAgentReturn {
   send: (text: string) => Promise<void>
   /** 是否正在接收 SSE 事件 */
   isStreaming: boolean
+  /** 切换 dataset 后正在从 DB 加载历史。UI 据此显示骨架/控制滚动定位 */
+  isLoadingHistory: boolean
   /** 最近一次错误的消息，新一次 send 开始时清空 */
   error: string | null
-  /** 清空当前数据集的对话（不影响其他数据集），并取消进行中的请求 */
+  /** 清空当前数据集的对话（仅前端 state；DB 清理待 New Chat 功能实现） */
   reset: () => void
 }
 
 export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
-  // LLM 格式的历史，前端当黑盒维护（不解构内部）。每轮 done 事件后 append。
-  const llmHistoryRef = useRef<unknown[]>([])
 
-  // ---- 多数据集独立存档 ----
-  // 切换 datasetId 时不丢历史：旧 dataset 的对话存进 Map，新 dataset 从 Map 取出。
-  // 各数据集的 LLM 上下文相互隔离（不会污染）— 因为切换时 swap 整个 llmHistory。
-  const storeRef = useRef<Map<string, DatasetHistory>>(new Map())
-  // 跟踪最新 messages 供 useEffect cleanup 读取（避免 stale closure）
-  const messagesRef = useRef<ChatMessage[]>([])
-
+  // 切换 datasetId 时：取消进行中的请求，从 DB 加载历史
   useEffect(() => {
-    messagesRef.current = messages
-  }, [messages])
+    abortRef.current?.abort()
+    abortRef.current = null
+    setIsStreaming(false)
+    setError(null)
+
+    if (!datasetId) {
+      setMessages([])
+      setIsLoadingHistory(false)
+      return
+    }
+
+    let cancelled = false
+    // 进入 loading 态：清空消息 + 标记加载中。ChatPanel 据此跳过滚动动画
+    setIsLoadingHistory(true)
+    setMessages([])
+
+    fetch(`/api/messages?datasetId=${encodeURIComponent(datasetId)}`)
+      .then(async (r) => {
+        if (!r.ok) {
+          const body = (await r.json().catch(() => ({}))) as { error?: string }
+          throw new Error(body.error ?? `HTTP ${r.status}`)
+        }
+        return r.json() as Promise<ChatMessage[]>
+      })
+      .then((data) => {
+        if (cancelled) return
+        // 一次 setState 同时更新 messages 和 loading 状态，React 会 batch 成一次 render
+        setMessages(data)
+        setIsLoadingHistory(false)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        const msg = e instanceof Error ? e.message : String(e)
+        setError(`加载历史失败：${msg}`)
+        setIsLoadingHistory(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [datasetId])
 
   const reset = useCallback(() => {
     abortRef.current?.abort()
@@ -68,43 +102,7 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
     setMessages([])
     setError(null)
     setIsStreaming(false)
-    llmHistoryRef.current = []
-    if (datasetId) {
-      storeRef.current.delete(datasetId)
-    }
-  }, [datasetId])
-
-  // dataset 切换：保存离开的（cleanup）+ 加载进入的（effect body）。
-  // 单次切换的时序：
-  //   1. cleanup 跑：把 messagesRef / llmHistoryRef 当前值写到 storeRef 的旧 datasetId
-  //   2. body 跑：从 storeRef 读新 datasetId 的存档，setMessages + 重置 refs
-  useEffect(() => {
-    abortRef.current?.abort()
-    abortRef.current = null
-    setIsStreaming(false)
-    setError(null)
-
-    if (datasetId) {
-      const stored = storeRef.current.get(datasetId)
-      const initial = stored?.messages ?? []
-      setMessages(initial)
-      messagesRef.current = initial
-      llmHistoryRef.current = stored?.llmHistory ?? []
-    } else {
-      setMessages([])
-      messagesRef.current = []
-      llmHistoryRef.current = []
-    }
-
-    return () => {
-      if (datasetId) {
-        storeRef.current.set(datasetId, {
-          messages: messagesRef.current,
-          llmHistory: llmHistoryRef.current,
-        })
-      }
-    }
-  }, [datasetId])
+  }, [])
 
   const send = useCallback(
     async (text: string) => {
@@ -118,6 +116,9 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
 
       const assistantId = crypto.randomUUID()
 
+      // 立刻在 UI 显示用户消息 + 空 assistant 占位（带 spinner）
+      // 注意：这里用的 user message id 是前端临时 UUID。
+      // 刷新后从 DB 加载会替换成后端 UUID，对用户透明。
       setMessages((prev) => [
         ...prev,
         { id: crypto.randomUUID(), role: 'user', content: trimmed },
@@ -140,11 +141,8 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
         const response = await fetch('/api/agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            datasetId,
-            message: trimmed,
-            previousMessages: llmHistoryRef.current,
-          }),
+          // 不再传 previousMessages —— 后端从 DB 加载历史
+          body: JSON.stringify({ datasetId, message: trimmed }),
           signal: controller.signal,
         })
 
@@ -157,14 +155,6 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
         if (!response.body) throw new Error('响应缺少 body')
 
         await consumeSSE(response.body, (event) => {
-          if (event.type === 'done') {
-            // 多轮上下文：把本轮新增的 LLM messages append 到 history
-            llmHistoryRef.current = [
-              ...llmHistoryRef.current,
-              ...event.messages,
-            ]
-            return
-          }
           handleEvent(assistantId, event, setMessages, setError)
         })
       } catch (e) {
@@ -182,7 +172,7 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
     [datasetId, isStreaming],
   )
 
-  return { messages, send, isStreaming, error, reset }
+  return { messages, send, isStreaming, isLoadingHistory, error, reset }
 }
 
 // ============================================================
@@ -305,7 +295,8 @@ function applyEventToAssistant(
       return { ...msg, steps }
     }
     case 'done': {
-      // done 事件由 send() 内部直接处理（更新 llmHistoryRef），UI 不响应
+      // 后端已保存到 DB，前端不需要做什么
+      // 刷新页面时通过 GET /api/messages 重新加载即可
       return msg
     }
   }
