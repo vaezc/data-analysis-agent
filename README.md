@@ -11,11 +11,9 @@
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs)](https://nextjs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](https://typescriptlang.org)
 [![DeepSeek](https://img.shields.io/badge/DeepSeek-V4-6366F1)](https://platform.deepseek.com)
-[![Demo](https://img.shields.io/badge/Live_Demo-pending_Supabase-F59E0B?logo=vercel)](#roadmap)
+[![Live](https://img.shields.io/badge/Live-Demo-22c55e?logo=vercel)](https://data-analysis-agent-omega.vercel.app)
 
-🚧 **Live Demo coming soon** — pending Supabase persistence ([Roadmap ↓](#roadmap))
-
-[📖 学习笔记](./LEARNING.md) · [📊 进度看板](./PROGRESS.md)
+[🌐 **Live Demo**](https://data-analysis-agent-omega.vercel.app) · [📖 学习笔记](./LEARNING.md) · [📊 进度看板](./PROGRESS.md)
 
 </div>
 
@@ -163,15 +161,15 @@ npm run dev
 ```bash
 # 1. push 到自己的 GitHub 仓库
 # 2. Vercel 导入项目
-# 3. 添加 3 个环境变量（Production scope）：
-#    LLM_PROVIDER = deepseek
-#    LLM_API_KEY  = sk-xxx
-#    LLM_MODEL    = deepseek-v4-flash
-# 4. Deploy
+# 3. 添加 5 个环境变量（Production scope）：
+#    LLM_PROVIDER                = deepseek
+#    LLM_API_KEY                 = sk-xxx
+#    LLM_MODEL                   = deepseek-v4-flash
+#    SUPABASE_URL                = https://xxx.supabase.co
+#    SUPABASE_SERVICE_ROLE_KEY   = sb_secret_xxx
+# 4. 在 Supabase 控制台跑建表 SQL（datasets + messages，见 lib/messages-store.ts）
+# 5. Deploy
 ```
-
-> ⚠️ **已知问题**：内存版 dataset store 在 Vercel Serverless 上跨函数不共享，
-> 上传后可能查不到 dataset。Phase 3 Supabase 持久化已规划解决（见 Roadmap）。
 
 ---
 
@@ -236,7 +234,8 @@ data-analysis-agent/
 - [x] **Phase 1** — Agent 主循环、工具系统、SSE 流式
 - [x] **Phase 2** — Recharts 图表、明暗主题、流式 answer、多轮上下文
 - [x] **Phase 3 (部分)** — HTML 报告导出 + SVG 内嵌
-- [ ] **Supabase 持久化** — 数据集 + 对话历史（解决 Vercel Serverless 内存隔离）
+- [x] **Vercel 部署上线** — Live Demo 可用
+- [x] **Supabase 持久化** — 数据集 + 对话历史（解决 Vercel Serverless 跨函数内存隔离）
 - [ ] **E2B 沙箱** — 替换 `node:vm` 跑真 Python
 - [ ] **滑动窗口上下文** + 前端 New Chat 按钮
 - [ ] **DuckDB-WASM** — 大数据集真 SQL 分析
