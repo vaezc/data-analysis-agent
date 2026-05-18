@@ -868,9 +868,9 @@ useEffect(() => {
 - **从 LLM 的"认知误差"修复出发**：LLM 按 markdown 习惯认为图表就是 `![]()`，我们要么让它的认知贴近现实（prompt），要么让现实贴近它的认知（兜底）。
 - 抓 SVG 用 DOM 查询是合理选择——React ref forward 要跨多个组件传递，复杂度高，而 DOM 查询是稳定的（消息已渲染后才点下载）。
 
-### 4.4 二次 LLM 调用生成代码 + vm 沙箱
+### 4.4 二次 LLM 调用生成 SQL + SQLite 沙箱
 
-**位置**：`lib/tools/executor.ts:95-192`
+**位置**：`lib/tools/executor.ts`、`lib/tools/sqlite-runner.ts`
 
 **模式**：
 
@@ -880,25 +880,110 @@ useEffect(() => {
 Agent 调 run_analysis(intent: "按 region 分组对 sales 求和")
   ↓
 executor 拿到 intent，开第二次 LLM 调用（带 schema + 样本）
-  ↓ LLM 输出 JS 代码字符串
-"return Object.entries(rows.reduce(...)).map(...)"
+  ↓ LLM 输出 SQLite SQL
+SELECT "region", SUM(COALESCE("sales", 0)) AS total
+FROM data
+GROUP BY "region"
+ORDER BY total DESC
   ↓
-vm.runInContext(code, { rows, Math, Object, ... }, { timeout: 5000 })
+better-sqlite3 :memory: → CREATE TABLE → 批量 INSERT（transaction）→ 执行 SQL
   ↓
-返回 JSON 结果给 Agent
+返回结果给 Agent
 ```
 
 **为什么这种设计**：
 
-- 不用 ReAct 让 Agent 直接写 Python——我们没有 Python 运行时（Phase 2 才接 E2B）。
-- 不在 prompt 里硬编码"按 region 分组"等规则——业务太多种，覆盖不完。
-- 让二级 LLM 根据 intent 生成代码，相当于把"如何计算"也变成 AI 的能力。
-- vm + 白名单 globals + 5s timeout = 基本安全（CLAUDE.md 标注了 L2 局限，知道这不是真沙箱）。
+- **AI 分层**：Agent 负责"决策做什么"（调哪个工具），二级 LLM 负责"具体怎么算"（生成 SQL）。两个 LLM 各管一摊，prompt 都简洁。
+- **不用硬编码规则**：业务问法太多种，覆盖不完。让二级 LLM 根据 intent 生成 SQL 是把"如何计算"变成 AI 能力。
+- **SQLite 比 vm 强**：真 SQL 引擎，支持 GROUP BY / 窗口函数 / CTE / JOIN，能表达的分析远超 JS 脚本。
+- **安全 + 沙箱**：SQLite 是世界上最被审计过的 DB 之一。三层防御：(1) 必须 SELECT/WITH 开头，(2) 拒绝 DDL/DML 关键字（DROP/DELETE/ALTER/ATTACH...），(3) `:memory:` per-query 用完即销毁。
+
+**演进历史**（面试可以讲）：
+
+第一版用 `node:vm` 跑 LLM 生成的 JS：
+
+```ts
+vm.runInContext(`(() => { ${code} })()`, { rows, Math, Object, ... }, { timeout: 5000 })
+```
+
+后来发现两个问题——
+1. **安全**：vm 历史上有上下文逃逸 CVE，globals 白名单也不可靠
+2. **能力**：JS 写 group by 啰嗦、不擅长 SQL 类操作
+
+迁移到 better-sqlite3：换了一个"真正的执行引擎"。LLM 生成 SQL 比生成 JS 更准确（SQL 是 LLM 训练数据里最多的代码之一）。
 
 **面试讲点**：
 
-- **AI 分层**：Agent 负责"决策做什么"，二级 LLM 负责"具体怎么算"，关注点分离。
-- 局限知晓：vm 不是真沙箱（历史有上下文逃逸 CVE），生产应接 E2B / Pyodide / Docker。
+- **关注点分离**：Agent 的"工具调度" vs 二级 LLM 的"代码生成"
+- **演进意识**：vm → SQLite 的迁移是"看到风险 + 主动重构"，不是"一上来就完美"。讲故事比一上来就声称用最完美方案有说服力
+- **为什么不用 DuckDB**：见 5.9 踩坑——包体积爆 Vercel hobby 50MB 限制
+
+### 4.6 LLM 动态生成提问建议（替代硬编码模板）
+
+**问题**：EmptyState 显示的"示例问题"原本是硬编码 `EXAMPLE_QUESTIONS`，每个 dataset 都显示同样的"哪个区域销售额最高？"——切到员工数据集时这套问题完全不适用。
+
+**第一版方案：模板拼装**
+
+```ts
+function generateSuggestions(columns: Column[]): string[] {
+  const numCols = columns.filter(c => c.type === 'number')
+  const strCols = columns.filter(c => c.type === 'string')
+  if (strCols.length > 0 && numCols.length > 0) {
+    return [`哪个 ${strCols[0].name} 的 ${numCols[0].name} 最高？`]
+  }
+  // ...
+}
+```
+
+**用户反馈**："哪个 region 的 units 最高 这个有点太生硬了"——**中英混搭**让句子读起来割裂（列名是英文时尤其明显）。
+
+**第二版方案：LLM 生成**
+
+新建 `lib/suggestions.ts`：
+
+```ts
+const SYSTEM_PROMPT = `你是数据分析助手。根据列结构和样本，
+生成 3 个适合该数据集的中文提问建议...
+反例（不要这样）："哪个 region 的 units 最高"
+正例：'哪个区域的销量最高？' 或 '不同 region 的 units 分布如何？'`
+```
+
+新建 `/api/datasets/[id]/suggestions` 端点：lazy 调 LLM，不缓存到 DB。
+
+前端 ChatPanel：
+
+```tsx
+const [llmSuggestions, setLlmSuggestions] = useState<string[] | null>(null)
+const cacheRef = useRef<Map<string, string[]>>(new Map())  // 会话内缓存
+
+useEffect(() => {
+  if (cacheRef.current.has(datasetId)) {
+    setLlmSuggestions(cacheRef.current.get(datasetId)!)
+    return
+  }
+  fetch(`/api/datasets/${datasetId}/suggestions`)
+    .then(r => r.json())
+    .then(data => {
+      cacheRef.current.set(datasetId, data.suggestions)
+      setLlmSuggestions(data.suggestions)
+    })
+}, [datasetId])
+
+const suggestions = llmSuggestions ?? templateSuggestions  // 模板 fallback
+```
+
+**关键设计**：
+
+1. **渐进增强**：模板 suggestions 立即显示，LLM 返回后替换。用户感觉不到加载延迟
+2. **会话内缓存**：useRef Map，切回同一 dataset 不重复调
+3. **fallback 链**：LLM 失败 → 模板 → 用户体验不挂掉
+
+**成本**：每次 ~500 token + ~100 token 输出 ≈ ¥0.001。用户切到一个新 dataset 调一次，**单 dataset 一辈子调一次** 
+
+**面试讲点**：
+
+- 这是个**"模板 vs LLM"的工程权衡**：模板免费但生硬，LLM 自然但慢且要钱。最终方案两个都用——模板做即时 fallback，LLM 做异步增强
+- **缓存层次**：会话内 useRef Map（最快） → 失败时回退到模板 → 多层防御
 
 ### 4.5 报告格式选型：HTML 而非 Markdown / PDF
 
@@ -975,6 +1060,56 @@ vm.runInContext(code, { rows, Math, Object, ... }, { timeout: 5000 })
 **当前应对**：CSV 不受影响（用 papaparse），Excel 受影响但 Phase 1/2 demo 攻击面窄。**Phase 3 上线前必须升级或换 exceljs**。
 
 **面试讲点**："我知道这个 CVE 存在，知道影响面、知道 Phase 3 怎么解决"——这是真实工程师的回答，不是"我没注意到"。
+
+### 5.9 DuckDB 包体积爆 Vercel hobby function 限制
+
+**症状**：要替换 vm 沙箱，第一选择是 DuckDB（最强 OLAP 引擎）。`npm install @duckdb/node-api` 后看 `node_modules/@duckdb`：**115MB**。
+
+Vercel function size 限制：
+
+| Plan | 限制 |
+|---|---|
+| Hobby（免费） | **50 MB** |
+| Pro | 250 MB |
+
+115MB 必爆 Hobby。**作品集项目部署在 Hobby plan，不能为了一个包升级 Pro**。
+
+**演进过程**：
+1. ❌ `@duckdb/node-api`（115 MB）— 爆限制
+2. ❌ `@duckdb/duckdb-wasm`（30 MB + Worker 配置复杂）— Node 端用法非官方
+3. ❌ `sql.js`（SQLite WASM，~1 MB）— Vercel 加载 wasm 文件路径配置麻烦
+4. ✅ **`better-sqlite3`**（~5 MB Linux x64 prebuilt）— native binding，Vercel 完美兼容
+
+**额外坑**：better-sqlite3 是 native binding，Next.js Turbopack/webpack inline 打包会导致 `.node` 文件加载失败。`next.config.ts` 加：
+
+```ts
+serverExternalPackages: ['better-sqlite3']
+```
+
+让 Vercel 把它当外部依赖、运行时 `require()` 加载。
+
+**面试讲点**：
+
+- **不是所有"高级"技术都适合 demo / 免费部署**：DuckDB 强但太重。SQLite 弱但永远够用。**SQL 能力对 demo 完全够，性能差距在 demo 规模下无感知**
+- **决策框架**：包体积、平台限制、维护活跃度——三选一不够，最好三个都过
+- 写在 LEARNING 里：选型试错过程比"一上来就用对"更有信服力
+
+### 5.10 模板硬拼列名生硬
+
+**症状**：示例问题"哪个 region 的 units 最高？" —— 中文 + 英文列名混搭让句子割裂，用户读起来不顺。
+
+**根因**：模板拼装本质是"占位符替换"，不理解语义。列名是中文时（"区域"、"销量"）OK，英文时就出问题。
+
+**解决**：换 LLM 生成（详见 4.6）。系统 prompt 里**显式给反例**让 LLM 知道什么写法不要：
+
+```
+反例（不要这样）："哪个 region 的 units 最高"
+正例：'哪个区域的销量最高？' 或 '不同 region 的 units 分布如何？'
+```
+
+LLM 看到反例后会主动避开。
+
+**教训**：**用 LLM 时不要只给正例**，给反例往往效果更好（指出"这种不要"比"这种要"更有约束力，因为反例稀少）。
 
 ### 5.8 Vercel Serverless 跨函数内存隔离
 
@@ -1197,19 +1332,23 @@ vm.runInContext(code, { rows, Math, Object, ... }, { timeout: 5000 })
 - ✅ **Supabase 持久化**（L4 + L8，2026-05-17）— datasets / messages 表，解决 Vercel 跨函数内存隔离 + 刷新丢历史
 - ✅ **切换 dataset 体验 polish**（2026-05-17）— skeleton + `useLayoutEffect` 同步定位
 
-待做（按优先级排）：
+已完成（续，2026-05-17 ~ 18）：
 
-1. **xlsx 升级 / 替换 exceljs**（L1，安全）
-2. **错误条 dismiss 按钮**（UX）
-3. **数据集删除按钮**（UX）
-4. **上传文件大小限制**（防 DoS）
-5. **会话长度管理**（详见 6.2）：滑动窗口 + 前端 New Chat 兜底
-6. **E2B 沙箱**（替换 vm，L2/L3）
-7. **二次 LLM 缓存**（L10）
-8. **多 Excel sheet 支持**（4.4）
-9. **可观测性**（耗时、token 数、失败率，4.5）
-10. **Demo 数据集 + 一键试用按钮**（降低试用门槛）
-11. **Vision 多模态 / DuckDB-WASM**（创新加分项）
+- ✅ **错误条 dismiss + 数据集删除 + New Chat**（UX 三连）
+- ✅ **Demo 数据集 + 一键试用按钮**（降低试用门槛）
+- ✅ **xlsx → exceljs**（L1，解 CVE）
+- ✅ **滑动窗口 loadConversation**（最近 40 条 messages 上限）
+- ✅ **better-sqlite3 替换 vm**（L2 + L3，run_analysis 改跑 SQL）
+- ✅ **Vision 多模态架构**（后端协议层 ready，前端 UI 暂时下线待 vision LLM）
+- ✅ **动态 LLM suggestions**（替代硬拼模板，模板 fallback + 会话缓存）
+
+待做（真正剩余、低优先级）：
+
+1. **E2B 沙箱**（替代 better-sqlite3 跑真 Python）— 需付费 API key 暂搁
+2. **二次 LLM 缓存**（L10）
+3. **多 Excel sheet 支持**（4.4）
+4. **可观测性**（耗时、token 数、失败率，4.5）
+5. **数据集列表搜索**（datasets > 10 时需要）
 
 每一项都对应 PROGRESS.md 的具体编号，可以追溯。
 
@@ -1217,24 +1356,33 @@ vm.runInContext(code, { rows, Math, Object, ... }, { timeout: 5000 })
 
 ## 8. 关键文件速查表
 
-| 文件 | 行数 | 一句话职责 | 改它前先看 |
-|---|---|---|---|
-| `lib/agent.ts` | 247 | Agent 主循环 + SSE emit | 调试流式 / 多轮 / tool_call 累积 |
-| `lib/tools/executor.ts` | 279 | 4 个工具的实现 + vm 沙箱 | 加新工具 / 改沙箱 |
-| `lib/tools/definitions.ts` | 182 | 工具 schema (给 LLM 看) | 模型不调工具 / 调错工具 |
-| `lib/llm.ts` | ~80 | provider 抽象 + stream 接口 | 切换 provider / 加新模型 |
-| `lib/dataset-store.ts` | ~150 | 内存数据集存储 + 类型推断 | 上传问题 / 列类型错误 |
-| `hooks/use-agent.ts` | 312 | SSE 消费 + 多轮历史 + per-dataset 隔离 | 前端流式问题 / 切换 dataset 丢消息 |
-| `components/chat/ChatPanel.tsx` | ~160 | 输入框 + sticky 滚动 + 空状态 | 滚动不跟 / 输入体验 |
-| `components/chat/MessageBubble.tsx` | ~180 | 单条消息（steps + charts + reports + content） | 消息布局 / 头像 / Markdown 样式 |
-| `components/chat/ChartRenderer.tsx` | ~290 | Recharts 4 类型 + PALETTE + token 化样式 | 图表样式 / 加新图表类型 |
-| `components/chat/ReportCard.tsx` | 413 | 报告卡片 + HTML 生成 + SVG 嵌入 | 报告样式 / 下载格式 |
-| `components/chat/StepList.tsx` | ~80 | Agent 步骤进度（单行 summary + 展开历史） | 步骤显示 |
-| `types/index.ts` | 144 | 全局类型（StreamEvent / ChatMessage 等） | 加新事件类型 / 新消息字段 |
-| `app/api/agent/route.ts` | ~80 | SSE 端点 | 端点参数 / SSE header |
-| `app/api/upload/route.ts` | ~70 | 文件上传 + 解析 | 上传错误 / 解析错误 |
-| `app/globals.css` | 134 | Tailwind v4 + 14 token + 动画 | 主题色调 / 动画 |
-| `app/page.tsx` | ~125 | 主布局（sidebar + main） | 布局 / 侧栏 |
+| 文件 | 一句话职责 | 改它前先看 |
+|---|---|---|
+| `lib/agent.ts` | ★ Agent 主循环 + SSE emit + multimodal user message | 调试流式 / 多轮 / tool_call 累积 |
+| `lib/tools/executor.ts` | 4 个工具的实现 + tool result 截断 + 二次 LLM 调用 | 加新工具 / 改 prompt |
+| `lib/tools/sqlite-runner.ts` | better-sqlite3 SQL 沙箱（替代 vm） | 改 SQL 校验 / 性能 |
+| `lib/tools/definitions.ts` | 工具 schema (给 LLM 看) | 模型不调工具 / 调错工具 |
+| `lib/llm.ts` | provider 抽象 + stream 接口 + 详细错误诊断 | 切换 provider / 加新模型 |
+| `lib/supabase.ts` | Supabase server client 单例 | service_role 配置 / RLS |
+| `lib/dataset-store.ts` | 数据集 CRUD（Supabase 后端） + CSV/Excel 解析 + 类型推断 | 上传问题 / 列类型错误 |
+| `lib/messages-store.ts` | 对话消息持久化 + 滑动窗口（loadConversation 最近 40 条） | 历史不全 / 切换 dataset 丢消息 |
+| `lib/suggestions.ts` | LLM 生成自然中文提问建议 | 建议生硬 / 改 prompt |
+| `hooks/use-agent.ts` | SSE 消费 + 历史加载 + isLoadingHistory + LLM suggestions 缓存 | 前端流式问题 / 切换 dataset |
+| `components/chat/ChatPanel.tsx` | 输入框 + sticky 滚动 + EmptyState 动态 suggestions | 滚动不跟 / 输入体验 |
+| `components/chat/MessageBubble.tsx` | 单条消息（steps + charts + reports + content + images） | 消息布局 / Markdown 样式 |
+| `components/chat/ChartRenderer.tsx` | Recharts 4 类型 + PALETTE + token 化样式 | 图表样式 / 加新图表类型 |
+| `components/chat/ReportCard.tsx` | 报告卡片 + HTML 生成 + SVG 嵌入 | 报告样式 / 下载格式 |
+| `components/chat/StepList.tsx` | Agent 步骤进度（单行 summary + 展开历史） | 步骤显示 |
+| `types/index.ts` | 全局类型（StreamEvent / ChatMessage / images / etc.） | 加新事件类型 / 新消息字段 |
+| `app/api/agent/route.ts` | SSE 端点 + reducer 累积 assistant + 保存 messages | SSE header / 持久化逻辑 |
+| `app/api/upload/route.ts` | 文件上传 + 解析 + 大小限制 20MB | 上传错误 / 解析错误 |
+| `app/api/datasets/route.ts` | GET 数据集列表 | sidebar 加载问题 |
+| `app/api/datasets/[id]/route.ts` | DELETE 数据集（级联清 messages） | 删除问题 |
+| `app/api/datasets/[id]/suggestions/route.ts` | GET LLM 生成的提问建议 | 建议生硬 / 加载慢 |
+| `app/api/messages/route.ts` | GET 历史 / DELETE 清空（New Chat） | 历史加载 / 清空 |
+| `app/globals.css` | Tailwind v4 + 14 token + 动画 | 主题色调 / 动画 |
+| `app/page.tsx` | 主布局（sidebar + main）+ 一键试用 demo + 数据集删除 | 布局 / 侧栏 |
+| `next.config.ts` | `serverExternalPackages: ['better-sqlite3']` | Vercel native binding 报错 |
 
 ---
 

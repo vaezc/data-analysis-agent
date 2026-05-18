@@ -141,7 +141,8 @@
 
 - [ ] 二次 LLM 调用结果缓存（同 L10）
 - [ ] 大数据集 inspect_data 时延优化（当前会遍历全列做 nullCount，行数大时可改抽样）
-- [ ] tool result 自动截断（同 L9）
+- [x] ✅ tool result 自动截断（L9）
+- [x] ✅ 滑动窗口：loadConversation 限制最近 40 条 messages
 
 ### 4.2 Agent 行为质量
 
@@ -151,12 +152,17 @@
 
 ### 4.3 用户体验
 
-- [x] ✅ 流式 answer（同 L7）
-- [x] ✅ Agent 步骤展示（实现为 always 单行 summary，比折叠更直接；click 可展开历史步骤）
+- [x] ✅ 流式 answer（L7）
+- [x] ✅ Agent 步骤展示（实现为 always 单行 summary，click 可展开历史步骤）
 - [x] ✅ 错误以 inline 顶部 banner 提示（不用 alert）
+- [x] ✅ 错误条 dismiss × 按钮
+- [x] ✅ 数据集删除（sidebar hover trash icon）
+- [x] ✅ New Chat 按钮（floating 右上，confirm + DELETE messages）
+- [x] ✅ Demo 数据集 + sidebar 一键试用按钮
+- [x] ✅ 切换 dataset HistorySkeleton + 同步定位（`useLayoutEffect`）
+- [x] ✅ LLM 生成动态 suggestions（替代硬拼模板）
 - [ ] 图表交互（hover tooltip ✅；点击下钻 ⏳）
-- [ ] 数据集列表搜索 + 删除（删除按钮缺失）
-- [ ] 错误条 dismiss × 按钮
+- [ ] 数据集列表搜索（datasets > 10 时需要）
 - [ ] 文件上传进度条 + 大文件分片
 
 ### 4.4 工程
@@ -175,9 +181,10 @@
 
 ### 4.6 安全
 
-- [ ] Phase 3 前：xlsx 升级或替换（同 L1）
-- [ ] Phase 3 前：E2B 沙箱（同 L2）
-- [ ] 上传文件大小限制（防 DoS）
+- [x] ✅ xlsx 升级或替换（L1 已换 exceljs）
+- [x] ✅ vm 沙箱替换（L2/L3 已换 better-sqlite3 SQL 执行）
+- [x] ✅ 上传文件大小限制（20MB）
+- [ ] E2B 沙箱（需付费 API key 验证，暂搁）
 - [ ] LLM_API_KEY 服务端隔离（已经在 server only，但要确认不会泄露到客户端 bundle）
 
 ---
@@ -222,7 +229,8 @@
 - ✅ 报告导出
 - ✅ Supabase 持久化（L8 解决，附带解 L4）
 - ✅ Vercel 部署
-- ⏳ 2~3 个 Demo 数据集 + 截图/GIF
+- ✅ Demo 数据集 + 一键试用
+- ⏳ README 截图/GIF（用户后续补）
 
 ### 2026-05-17 收尾完成清单
 
@@ -234,7 +242,13 @@
 - ✅ xlsx → exceljs（解 L1）
 - ✅ 滑动窗口（loadConversation 限制最近 40 条 messages，约 20 轮）
 - ✅ better-sqlite3 替换 node:vm 沙箱（解 L2 + L3，run_analysis 改跑 SQL）
-- ✅ Vision 多模态架构（user message 支持 images，OpenAI multimodal 协议，**注：实际启用需要 vision-capable LLM 如 gpt-4o**）
+- ✅ Vision 多模态架构（user message 支持 images，OpenAI multimodal 协议；前端 UI 暂时隐藏，待切 vision-capable LLM 启用）
+
+### 2026-05-18 UX 微调
+
+- ✅ Vision 上传 UI 暂时隐藏（DeepSeek V4 不支持 image，避免误导用户）
+- ✅ 输入框 placeholder 与 EmptyState 示例问题：从硬编码改为根据当前 dataset 的 columns 动态生成
+- ✅ Suggestions 升级为 LLM 生成自然中文：新增 `lib/suggestions.ts` + `GET /api/datasets/[id]/suggestions`；前端切 dataset 时 fetch，会话内 `useRef<Map>` 缓存避免重复调用；加载期间用模板做 fallback
 
 ### 剩余可选项（真正的 nice-to-have）
 

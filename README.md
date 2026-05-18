@@ -64,13 +64,17 @@ Agent:   [Database]    正在读取数据结构...         ✓
 - 🤖 **多步 Agent 推理** — 自动调用 `inspect_data` → `run_analysis` → `create_chart` → `generate_report`
 - 🌊 **全程流式** — 文字 / 工具步骤 / 图表 / 报告通过 SSE 实时推送
 - 🧠 **支持 DeepSeek V4 thinking mode** — `reasoning_content` 字段按协议回 echo
+- 🗃️ **真 SQL 执行** — LLM 生成 SQLite SQL → better-sqlite3 `:memory:` 执行，支持 GROUP BY / 窗口函数 / CTE
+- 💾 **Supabase 持久化** — datasets / messages 双表，刷新不丢数据，Vercel 跨函数隔离已解决
 - 📊 **4 种图表类型** — bar / line / pie / scatter，基于 Recharts，主题色自动跟随
 - 📄 **HTML 报告导出** — 内嵌 SVG 图表，离线可双击打开，无外部依赖
 - 🌗 **明 / 暗主题** — 14 个语义化 CSS 变量，组件零硬编码颜色
-- 🔄 **每个数据集独立历史** — 切换数据集互不污染对话上下文
+- 🔄 **每数据集独立历史** — 切换数据集互不污染上下文 + sticky-to-bottom 滚动
 - 🌐 **Provider 抽象** — DeepSeek / OpenAI / Claude 通过环境变量切换
-- 🛡️ **沙箱执行** — LLM 生成的 JS 在 `node:vm` 内跑，globals 白名单 + 5s 超时
-- ✂️ **Token 控制** — 工具结果自动截断，长对话不爆上下文
+- 🛡️ **三层 SQL 安全** — 只允 SELECT/WITH 开头 + 禁 DDL/DML 关键字 + `:memory:` per-query
+- ✨ **动态提问建议** — LLM 根据 dataset schema 生成自然中文示例问题（替代硬编码模板）
+- ✂️ **Token 控制** — tool result 截断 + 滑动窗口（最近 40 条消息），长对话不爆上下文
+- 🎯 **一键试用** — 内置 2 个 demo 数据集，新用户零门槛体验
 
 ---
 
@@ -82,12 +86,13 @@ Agent:   [Database]    正在读取数据结构...         ✓
 | 语言 | **TypeScript strict** | 类型在 SSE / tool / LLM 协议间流转，必须 strict |
 | LLM | **DeepSeek V4** (OpenAI 兼容) | 中文好、价格低、支持 Tool Use 与 thinking mode |
 | 流式 | **原生 SSE + ReadableStream** | 单向流足够；WebSocket 是双向通信，本场景过度设计 |
+| 持久化 | **Supabase** (Postgres) | datasets + messages 双表；service_role 后端代理 |
 | 图表 | **Recharts** | React 原生 + SVG 输出（可抓取嵌入报告） |
 | 样式 | **Tailwind v4** + CSS variables | `@theme inline` 让 token 体系天然落地 |
 | 主题 | next-themes | SSR 安全、不闪 |
 | Markdown | react-markdown + remark-gfm | 14 个元素 custom map，贴合对话紧凑场景 |
-| 解析 | papaparse + xlsx | 服务端解析，含列类型推断 |
-| 沙箱 | `node:vm` (Phase 1) → E2B (规划) | globals 白名单 + 5s timeout |
+| 解析 | papaparse + **exceljs** | 服务端解析；exceljs 替代 xlsx 解 CVE |
+| SQL 执行 | **better-sqlite3** `:memory:` | 替代 node:vm 沙箱；真 SQL 引擎 + 三层防御 |
 | 报告 | marked + inline CSS | 离线可读 + 内嵌 SVG 图表 |
 
 ---
@@ -179,24 +184,34 @@ npm run dev
 data-analysis-agent/
 ├── app/
 │   ├── api/
-│   │   ├── agent/route.ts          # SSE Agent 端点
-│   │   └── upload/route.ts         # 文件上传 + 解析
-│   ├── page.tsx                    # 主对话界面
-│   └── globals.css                 # 14 个语义 CSS token
+│   │   ├── agent/route.ts                # SSE Agent 端点
+│   │   ├── upload/route.ts               # 文件上传 + 解析
+│   │   ├── datasets/
+│   │   │   ├── route.ts                  # GET 列表
+│   │   │   └── [id]/
+│   │   │       ├── route.ts              # DELETE
+│   │   │       └── suggestions/route.ts  # GET LLM 生成的提问建议
+│   │   └── messages/route.ts             # GET 历史 / DELETE 清空
+│   ├── page.tsx                          # 主对话界面 + sidebar
+│   └── globals.css                       # 14 个语义 CSS token
 ├── lib/
-│   ├── agent.ts                    # ★ Agent 主循环
-│   ├── llm.ts                      # Provider 抽象
-│   ├── dataset-store.ts            # 数据集存储（内存版，Supabase 规划中）
+│   ├── agent.ts                          # ★ Agent 主循环
+│   ├── llm.ts                            # Provider 抽象
+│   ├── supabase.ts                       # Supabase server client 单例
+│   ├── dataset-store.ts                  # 数据集 CRUD（Supabase 后端）
+│   ├── messages-store.ts                 # 对话消息持久化 + 滑动窗口
+│   ├── suggestions.ts                    # LLM 生成自然中文提问建议
 │   └── tools/
-│       ├── definitions.ts          # 工具 schema（给 LLM 看）
-│       └── executor.ts             # 工具执行 + 截断
+│       ├── definitions.ts                # 工具 schema（给 LLM 看）
+│       ├── executor.ts                   # 工具执行 + 截断
+│       └── sqlite-runner.ts              # ★ better-sqlite3 SQL 沙箱
 ├── hooks/
-│   └── use-agent.ts                # SSE 消费 + per-dataset 历史
+│   └── use-agent.ts                      # SSE 消费 + per-dataset 历史
 ├── components/chat/
-│   ├── ChatPanel.tsx
+│   ├── ChatPanel.tsx                     # 输入区 + sticky-to-bottom 滚动
 │   ├── MessageBubble.tsx
 │   ├── ChartRenderer.tsx
-│   ├── ReportCard.tsx              # HTML 导出 + 内嵌 SVG
+│   ├── ReportCard.tsx                    # HTML 导出 + 内嵌 SVG
 │   └── StepList.tsx
 └── types/index.ts                  # 全局类型（StreamEvent / ChatMessage）
 ```
@@ -233,13 +248,20 @@ data-analysis-agent/
 
 - [x] **Phase 1** — Agent 主循环、工具系统、SSE 流式
 - [x] **Phase 2** — Recharts 图表、明暗主题、流式 answer、多轮上下文
-- [x] **Phase 3 (部分)** — HTML 报告导出 + SVG 内嵌
-- [x] **Vercel 部署上线** — Live Demo 可用
-- [x] **Supabase 持久化** — 数据集 + 对话历史（解决 Vercel Serverless 跨函数内存隔离）
-- [ ] **E2B 沙箱** — 替换 `node:vm` 跑真 Python
-- [ ] **滑动窗口上下文** + 前端 New Chat 按钮
-- [ ] **DuckDB-WASM** — 大数据集真 SQL 分析
-- [ ] **Vision 多模态** — Agent 直接分析截图中的数据
+- [x] **Phase 3** — HTML 报告 + Supabase 持久化 + Vercel 上线
+- [x] **安全 / 性能 polish**
+  - xlsx → exceljs（解 CVE）
+  - node:vm → better-sqlite3 真 SQL 执行（解 vm 不安全 + 不支持 async）
+  - 滑动窗口 + tool result 截断（控 LLM token）
+- [x] **UX polish**
+  - 错误条 dismiss、数据集删除、New Chat、HistorySkeleton
+  - Demo 数据集 + 一键试用按钮
+  - LLM 生成的动态提问建议
+- [x] **Vision 多模态架构** — 后端协议层 ready，前端 UI 待 vision-capable LLM 启用
+- [ ] **E2B 沙箱** — 替代 better-sqlite3 跑真 Python（需付费 API key）
+- [ ] **二次 LLM 调用缓存** — 同 intent 复用，省 token
+- [ ] **多 Excel sheet 支持** — 当前只读第一个
+- [ ] **可观测性** — 耗时、token、失败率监控
 
 完整登记见 [`PROGRESS.md`](./PROGRESS.md)。
 
