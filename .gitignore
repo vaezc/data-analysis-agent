@@ -41,3 +41,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# 私人面试材料：本地保留，不公开
+INTERVIEW.md
