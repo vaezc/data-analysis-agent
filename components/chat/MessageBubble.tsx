@@ -16,18 +16,32 @@ interface MessageBubbleProps {
   isLast?: boolean
   /** 删除该消息（配对删除会同时删配对的另一条）。传 undefined 则不显示删除按钮 */
   onDelete?: () => void
+  /** 删除过渡中：触发淡出 + 缩小 + 上移动画（220ms 与 hook 内 setTimeout 对齐） */
+  isDeleting?: boolean
 }
+
+// 删除时的过渡 class：opacity + scale + translate-y 一起 transition
+// duration 220ms 与 hooks/use-agent.ts:DELETE_ANIM_MS 对齐
+// pointer-events-none 防止用户在淡出过程中再次点击 trash
+const DELETE_TRANSITION =
+  'transition-[opacity,transform] duration-[220ms] ease-out'
+const DELETING = 'opacity-0 scale-95 -translate-y-1 pointer-events-none'
 
 export function MessageBubble({
   message,
   isStreaming = false,
   isLast = false,
   onDelete,
+  isDeleting = false,
 }: MessageBubbleProps) {
   if (message.role === 'user') {
     return (
-      <div className="flex justify-end animate-message-in group/msg relative">
-        {onDelete && <DeleteButton align="left" onClick={onDelete} />}
+      <div
+        className={`flex justify-end animate-message-in group/msg relative ${DELETE_TRANSITION} ${isDeleting ? DELETING : ''}`}
+      >
+        {onDelete && !isDeleting && (
+          <DeleteButton align="left" onClick={onDelete} />
+        )}
         <div className="max-w-[80%] space-y-2">
           {/* 附加图片：放在文字气泡上方，与用户气泡右对齐 */}
           {message.images && message.images.length > 0 && (
@@ -59,8 +73,12 @@ export function MessageBubble({
   const showThinking = isStreaming && isLast && noContent && noRunningStep
 
   return (
-    <div className="flex gap-3 animate-message-in group/msg relative">
-      {onDelete && <DeleteButton align="right" onClick={onDelete} />}
+    <div
+      className={`flex gap-3 animate-message-in group/msg relative ${DELETE_TRANSITION} ${isDeleting ? DELETING : ''}`}
+    >
+      {onDelete && !isDeleting && (
+        <DeleteButton align="right" onClick={onDelete} />
+      )}
       {/* AI 头像 —— 用品牌图，背景放大居中让机器人主体填满圆形 */}
       <div
         className="size-8 shrink-0 rounded-full bg-no-repeat shadow-sm shadow-fg/10"

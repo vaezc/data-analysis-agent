@@ -50,6 +50,8 @@ interface UseAgentReturn {
   reset: () => Promise<void>
   /** 删除指定 ui.id 的消息（配对删除）。前端 message hover 时显示的 trash 按钮调用。 */
   deleteMessage: (messageId: string) => Promise<void>
+  /** 正在被删除的消息 ui.id 列表（已 fetch 成功，等待动画完成才从 messages 移除） */
+  deletingIds: string[]
 }
 
 export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
@@ -214,6 +216,15 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
 
   const clearError = useCallback(() => setError(null), [])
 
+  // 删除的两阶段：先 mark deletingIds（触发 UI 淡出动画），等动画完才真 filter
+  const [deletingIds, setDeletingIds] = useState<string[]>([])
+
+  /**
+   * 动画时长，需与 MessageBubble 的 CSS transition duration 一致。
+   * 220ms 与项目其它进出场动画（animate-message-in）对齐，节奏统一。
+   */
+  const DELETE_ANIM_MS = 220
+
   const deleteMessage = useCallback(async (messageId: string) => {
     try {
       const res = await fetch(
@@ -225,8 +236,20 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
         throw new Error(body.error ?? `HTTP ${res.status}`)
       }
       const data = (await res.json()) as { deletedIds: string[] }
-      // 从前端 state 移除被删的消息（配对删除可能返回 1 或 2 条 id）
-      setMessages((prev) => prev.filter((m) => !data.deletedIds.includes(m.id)))
+
+      // 阶段 1：标记 deletingIds，UI 上对应消息开始淡出 / 缩放
+      setDeletingIds((prev) => [...prev, ...data.deletedIds])
+
+      // 阶段 2：等动画跑完后，真正从 messages 移除 + 清理 deletingIds
+      // 用 setTimeout 串行而非 await Promise，避免阻塞——并发删多条时各自独立 timer
+      setTimeout(() => {
+        setMessages((prev) =>
+          prev.filter((m) => !data.deletedIds.includes(m.id)),
+        )
+        setDeletingIds((prev) =>
+          prev.filter((id) => !data.deletedIds.includes(id)),
+        )
+      }, DELETE_ANIM_MS)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       setError(`删除消息失败：${msg}`)
@@ -242,6 +265,7 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
     clearError,
     reset,
     deleteMessage,
+    deletingIds,
   }
 }
 

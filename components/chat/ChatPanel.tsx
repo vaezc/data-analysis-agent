@@ -151,6 +151,7 @@ export function ChatPanel({ datasetId, columns }: ChatPanelProps) {
     clearError,
     reset,
     deleteMessage,
+    deletingIds,
   } = useAgent({
     datasetId,
   });
@@ -303,6 +304,7 @@ export function ChatPanel({ datasetId, columns }: ChatPanelProps) {
                 onDelete={
                   isStreaming ? undefined : () => handleDeleteMessage(m.id)
                 }
+                isDeleting={deletingIds.includes(m.id)}
               />
             ))
           )}
