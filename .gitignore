@@ -42,5 +42,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# 私人面试材料：本地保留，不公开
+# 私人学习 / 面试材料：本地保留，不公开
 INTERVIEW.md
+FLOW.md
