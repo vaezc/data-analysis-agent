@@ -31,8 +31,9 @@
 | LLM | DeepSeek V4 (OpenAI 兼容) | 价格低、中文好、支持 thinking mode；OpenAI 兼容意味着切 provider 零业务改动 |
 | 流式 | SSE | 单向流（服务端推客户端）、HTTP 同源、断线浏览器自动重连。WebSocket 是双向通信用的，本场景过度设计 |
 | 图表 | Recharts | React 原生组件、SVG 输出（可抓取嵌入报告）、跟主题 token 兼容 |
-| 解析 | papaparse + xlsx | 服务端解析，避免大文件占用客户端内存 |
-| 沙箱 | node:vm | Phase 1 满足；E2B 是 Phase 3 的演进 |
+| 持久化 | Supabase (Postgres) | datasets / messages 双表；service_role 后端代理，解决 Vercel 跨函数内存隔离 |
+| 解析 | papaparse + exceljs | 服务端解析；exceljs 替代 xlsx@0.18 解 CVE |
+| SQL 执行 | better-sqlite3 `:memory:` | 替代 node:vm 沙箱；真 SQL 引擎 + 三层防御（SELECT-only + banned keyword + 临时库 per-query） |
 | 状态 | React useState + useRef | 没引 Redux/Zustand —— 状态局部、流转简单 |
 | 样式 | Tailwind v4 + CSS variables | v4 把配置移到 CSS（`@theme inline`），token 系统天然 |
 
@@ -160,7 +161,7 @@ messages = [
 ]
 ```
 
-然后 fetch：
+然后 fetch（注意：**前端不再传 previousMessages**，后端从 Supabase 加载历史）：
 
 ```http
 POST /api/agent HTTP/1.1
@@ -168,29 +169,43 @@ Content-Type: application/json
 
 {
   "datasetId": "ds_abc123",
-  "message": "哪个区域销售额最高？",
-  "previousMessages": []
+  "message": "哪个区域销售额最高？"
 }
 ```
 
-注意 `previousMessages: []`——第一次提问 `llmHistoryRef.current` 是空数组。第二轮起会带上一轮的完整历史。
+历史完全由后端从 messages 表读取（详见 §3.5 演进故事）。前端只维护当前会话的 UI 状态。
 
 **② API Route → runAgent**（`app/api/agent/route.ts`）
 
-API Route 创建 SSE 流，把 `onEvent` 接到 stream writer：
+API Route 干三件事：(1) 从 DB 加载历史；(2) 立刻保存 user message（防 agent 跑挂丢消息）；(3) 创建 SSE 流，把累积的 assistant state 在 finally 中保存到 DB。
 
 ```ts
+// (1) 从 messages 表加载最近 40 条历史（滑动窗口，详见 §3.5）
+const { llmMessages: previousMessages } = await loadConversation(datasetId)
+
+// (2) 立刻入库用户消息（agent 即使挂了，用户消息也不丢）
+await saveUserMessage(datasetId, userText)
+
+// (3) 构造 SSE 流 + 累积 assistant state
+const assistant: ChatMessage = { id: ..., role: 'assistant', steps: [], charts: [], reports: [], content: '' }
+let newLlmMessages: ChatCompletionMessageParam[] = []
+
 const stream = new ReadableStream({
-  start(controller) {
-    runAgent({
-      datasetId: 'ds_abc123',
-      userMessage: '哪个区域销售额最高？',
-      previousMessages: [],
-      onEvent: (event) => {
-        const line = `data: ${JSON.stringify(event)}\n\n`
-        controller.enqueue(new TextEncoder().encode(line))
-      },
-    }).finally(() => controller.close())
+  async start(controller) {
+    const emit = (event) => {
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+      applyEventToAssistant(assistant, event)  // 累积 UI state
+      if (event.type === 'done') newLlmMessages = event.messages.filter(m => m.role !== 'user')
+    }
+    try {
+      await runAgent({ datasetId, userMessage: userText, previousMessages, onEvent: emit })
+    } finally {
+      // 流结束保存 assistant message 到 DB
+      if (assistant.content || assistant.steps.length > 0) {
+        await saveAssistantMessage(datasetId, assistant, newLlmMessages)
+      }
+      controller.close()
+    }
   }
 })
 ```
@@ -379,22 +394,22 @@ POST https://api.deepseek.com/v1/chat/completions
 data: ...delta: { tool_calls: [{ index: 0, id: 'call_def', function: { name: 'run_analysis', arguments: '{"dataset_id":"ds_abc123","intent":"按 region 列分组并对 quantity*price 求和...","description":"正在按区域汇总销售额..."}' } }] }
 ```
 
-**⑨ run_analysis 特殊：内部又调一次 LLM 生成 JS**（`lib/tools/executor.ts:execAnalysis`）
+**⑨ run_analysis 特殊：内部又调一次 LLM 生成 SQL**（`lib/tools/executor.ts:execAnalysis`）
 
-这是项目独特的设计——`run_analysis` 工具内部还要再调 LLM 一次生成 JS 代码：
+这是项目独特的设计——`run_analysis` 工具内部还要再调 LLM 一次生成 SQLite SQL：
 
 ```ts
 async function execAnalysis({ dataset_id, intent, description }) {
-  const ds = getDataset(dataset_id)
-  // 二次 LLM 调用：根据 intent 生成 JS 代码
-  const code = await generateAnalysisCode(ds.columns, ds.rows.slice(0, 2), intent)
-  // 在 vm 沙箱执行
-  const result = runInSandbox(code, ds.rows)
-  return { description, data: result }
+  const ds = await getDataset(dataset_id)
+  // 二次 LLM 调用：根据 intent 生成 SQLite SQL
+  const sql = await generateAnalysisSQL(ds.columns, ds.rows.slice(0, 2), intent)
+  // better-sqlite3 :memory: 执行（替换之前的 vm 沙箱）
+  const result = runSQLOnDataset(sql, ds.columns, ds.rows)
+  return { description, data: truncateForLLM(result) }
 }
 ```
 
-`generateAnalysisCode` 发出**另一次完整 HTTP 请求**（与第 ④ 步不同）：
+`generateAnalysisSQL` 发出**另一次完整 HTTP 请求**（与第 ④ 步不同）：
 
 ```http
 POST https://api.deepseek.com/v1/chat/completions
@@ -405,11 +420,11 @@ POST https://api.deepseek.com/v1/chat/completions
   "messages": [
     {
       "role": "system",
-      "content": "你是数据分析代码生成器。根据用户的自然语言意图，生成一段 JavaScript 代码..."
+      "content": "你是数据分析 SQL 生成器。根据自然语言意图生成一条 SQLite SQL 查询。表名固定 data，列名用双引号..."
     },
     {
       "role": "user",
-      "content": "列：region(string), product(string), quantity(number), price(number)\n样本（前 2 行）：[{...},{...}]\n意图：按 region 列分组并对 quantity*price 求和"
+      "content": "列：\"region\"(string), \"product\"(string), \"quantity\"(number), \"price\"(number)\n样本（前 2 行）：[{...},{...}]\n意图：按 region 列分组并对 quantity*price 求和"
     }
   ]
 }
@@ -417,18 +432,32 @@ POST https://api.deepseek.com/v1/chat/completions
 
 DeepSeek 返回（非流式，一次给完）：
 
-```js
-const grouped = rows.reduce((acc, r) => {
-  const k = r.region
-  acc[k] = (acc[k] ?? 0) + Number(r.quantity ?? 0) * Number(r.price ?? 0)
-  return acc
-}, {})
-return Object.entries(grouped)
-  .map(([region, total]) => ({ region, total }))
-  .sort((a, b) => b.total - a.total)
+```sql
+SELECT
+  "region",
+  SUM(COALESCE("quantity", 0) * COALESCE("price", 0)) AS total
+FROM data
+GROUP BY "region"
+ORDER BY total DESC
 ```
 
-`vm.runInContext` 在沙箱里执行，返回：
+`runSQLOnDataset` 三步执行：
+
+```ts
+// 1. 三层防御校验（SELECT/WITH 开头 + banned keyword 正则）
+validateReadOnlySQL(userSQL)
+
+// 2. :memory: SQLite 加载 dataset → CREATE TABLE + 批量 INSERT（事务包裹）
+const db = new Database(':memory:')
+db.exec(`CREATE TABLE data (${columnDefs})`)
+const insertAll = db.transaction((rows) => { for (const r of rows) insert.run(...) })
+insertAll(rows)
+
+// 3. 执行用户 SQL，取结果
+return db.prepare(userSQL).all()
+```
+
+返回：
 
 ```ts
 [
@@ -497,9 +526,10 @@ data: {"type":"done","messages":[...]}
 
 每个事件按 `\n\n` 分隔，前端逐个 parse + handleEvent。
 
-**⑫ 前端 React state 最终态**
+**⑫ 前端 React state 最终态 + Supabase 持久化**
 
 ```ts
+// 前端只有 UI state，不再持有 LLM 协议历史
 messages = [
   { id: 'u-1', role: 'user', content: '哪个区域销售额最高？' },
   {
@@ -514,19 +544,30 @@ messages = [
     content: '华东区域销售额最高，达 **44,700** 元，比第二名华北（31,500）高出 42%。'
   }
 ]
-
-// llmHistoryRef.current 也更新了：
-[
-  { role: 'user', content: '哪个区域销售额最高？' },
-  { role: 'assistant', content: '', tool_calls: [...], reasoning_content: '...' },
-  { role: 'tool', tool_call_id: 'call_abc', content: '{...}' },
-  { role: 'assistant', content: '', tool_calls: [...], reasoning_content: '...' },
-  { role: 'tool', tool_call_id: 'call_def', content: '{...}' },
-  { role: 'assistant', content: '华东区域销售额最高...', reasoning_content: '...' }
-]
 ```
 
-下次用户再问问题，这 6 条作为 `previousMessages` 发回后端，构成多轮上下文。
+后端在 SSE 流的 `finally` 中**同步把这两条消息写入 Supabase `messages` 表**：
+
+```sql
+-- user 行（saveUserMessage 在 agent 启动前就 insert）
+INSERT INTO messages (dataset_id, role, ui, llm) VALUES (
+  'ds_abc123', 'user',
+  '{"id":"...","role":"user","content":"哪个区域销售额最高？"}',
+  '[{"role":"user","content":"哪个区域销售额最高？"}]'
+)
+-- assistant 行（saveAssistantMessage 在 finally 中 insert）
+INSERT INTO messages (dataset_id, role, ui, llm) VALUES (
+  'ds_abc123', 'assistant',
+  '{"id":"...","role":"assistant","steps":[...],"charts":[],"reports":[],"content":"..."}',
+  '[{"role":"assistant","content":"","tool_calls":[...],"reasoning_content":"..."},
+    {"role":"tool","tool_call_id":"call_abc","content":"{...}"},
+    {"role":"assistant","content":"","tool_calls":[...]},
+    {"role":"tool","tool_call_id":"call_def","content":"{...}"},
+    {"role":"assistant","content":"华东...","reasoning_content":"..."}]'
+)
+```
+
+**下次用户再问问题**：前端**不传** previousMessages，后端 `loadConversation(datasetId)` 从 messages 表加载最近 40 条（滑动窗口），展平成 LLM messages 数组发给 DeepSeek。**前端不再维护 llmHistoryRef，刷新页面历史也不丢**。
 
 **数据形态变换全景**
 
@@ -645,50 +686,94 @@ const client = new OpenAI({ apiKey, baseURL: PROVIDERS[provider].baseURL })
 - executor 是"业务逻辑"，与文案无关。
 - 修 description（改 prompt）和修执行（改业务）可独立 review。
 
-### 3.5 多轮对话：后端 stateless + 前端 history
+### 3.5 多轮对话持久化：从前端 history 到 Supabase（演进故事）
 
-**位置**：`hooks/use-agent.ts:51` + `app/api/agent/route.ts`
+**位置**：`lib/messages-store.ts`、`app/api/agent/route.ts`、`hooks/use-agent.ts`
 
-**关键决策**：服务端不存历史，**前端持有 `llmHistoryRef` 黑盒**，每次请求带过去。
+**关键决策**：后端读 / 写 DB 是 source of truth，前端只维护 UI 状态。
 
-**为什么**：
+#### 演进路径
 
-- 后端无状态 = 水平扩展无限制 = 多个 Vercel 实例 / 多个区域部署不需要 sticky session。
-- 前端只把后端返回的 `done.messages` append 到 ref，**不解构内部结构**——这意味着后端可以改 message 形态（比如换 provider），前端不用配合。
-- 代价：每次请求 payload 变大（带历史）。可接受，因为 LLM 上下文窗口本来就是瓶颈。
+**第一版**（Phase 2，本地运行良好）：
+- 后端 stateless，每次请求都不存
+- 前端 `llmHistoryRef` 持有 OpenAI 协议 messages 数组（黑盒）
+- 每次 send 把整个 history 当 `previousMessages` POST 过去
+- 优点：后端水平扩展无限制；前端不解构 message 形态，换 provider 不用配合
 
-### 3.6 Per-dataset 隔离：useEffect cleanup 模式
+**踩坑**（上线 Vercel 后）：
+- `/api/upload` 和 `/api/agent` 是两个独立 Lambda function
+- 内存 Map 跨函数完全不共享 → dataset 找不到
+- 即使 fluid compute warm 也不行（不同 endpoint 永远不同进程）
 
-**位置**：`hooks/use-agent.ts:81-107`
+**第二版**（Phase 3，当前架构）：
+- **Supabase 持久化**：datasets / messages 双表
+- **后端 stateful**：`/api/agent` 入口先 `saveUserMessage(datasetId, text)`；流结束 `finally` 中 `saveAssistantMessage(datasetId, ui, llm)`
+- **前端不再传 previousMessages**：后端 `loadConversation(datasetId)` 从 DB 读最近 40 条 messages（滑动窗口）展平成 LLM 协议
+- **前端 hook 大幅简化**：去掉 `llmHistoryRef`、`storeRef Map`、`messagesRef`——前端只 `setMessages` 来自服务端的 UI 形态
 
-**问题**：用户上传 3 个数据集，切换时各自的对话历史不能污染。
+#### 这个演进故事的面试价值
+
+> "上线前不知道 Vercel Serverless 跨函数内存隔离这件事，第一版就用前端持有 + 后端 stateless 跑得很好。上线后看 Function Logs 一眼就发现 `/api/upload` 写入的 Map 在 `/api/agent` 里查不到。**这是 Serverless 模型 vs 传统单进程 server 的核心区别**。2 小时内迁移到 Supabase，顺便解决了刷新丢历史（L8）和 HMR 丢数据（L4）。"
+
+工程上的 trade-off：
+
+| 维度 | 前端持有 + 后端 stateless | Supabase 持久化 |
+|---|---|---|
+| 水平扩展 | ✓ 后端无锁 | ✓ DB 是单一真相源 |
+| 跨 Lambda | ❌ 不支持 | ✓ 自然支持 |
+| 刷新保留 | ❌ 丢失 | ✓ 保留 |
+| 实现复杂度 | 简单 | 中等（建表 + CRUD） |
+| 适合场景 | 单机 / 单进程 | Serverless / 多区域 |
+
+### 3.6 切换 dataset 的体验：skeleton + useLayoutEffect 同步定位
+
+**位置**：`hooks/use-agent.ts:55-95` + `components/chat/ChatPanel.tsx:34-94`
+
+**问题**：切换 dataset 时三个体验问题——
+1. EmptyState "开始分析" 闪一下（误导用户）
+2. 历史一下子加载完，浏览器 paint 一帧"内容在顶部"
+3. 触发 smooth scroll 的动画感
 
 **方案**：
 
 ```ts
-const storeRef = useRef<Map<string, DatasetHistory>>(new Map())
-const messagesRef = useRef<ChatMessage[]>([])
-
+// hook 暴露 isLoadingHistory，切换 dataset 时进入 loading 态
+const [isLoadingHistory, setIsLoadingHistory] = useState(false)
 useEffect(() => {
-  // body：进入新 dataset，从 store 取存档
-  if (datasetId) {
-    const stored = storeRef.current.get(datasetId)
-    setMessages(stored?.messages ?? [])
-    llmHistoryRef.current = stored?.llmHistory ?? []
-  }
-  // cleanup：离开旧 dataset，把当前 ref 值存进 store
-  return () => {
-    if (datasetId) {
-      storeRef.current.set(datasetId, {
-        messages: messagesRef.current,   // 用 ref 避免 stale closure
-        llmHistory: llmHistoryRef.current,
-      })
-    }
-  }
+  if (!datasetId) return
+  setIsLoadingHistory(true)
+  setMessages([])
+  fetch(`/api/messages?datasetId=${datasetId}`)
+    .then(r => r.json())
+    .then(data => {
+      setMessages(data)
+      setIsLoadingHistory(false)  // batched with setMessages
+    })
 }, [datasetId])
 ```
 
-**关键陷阱**：cleanup 函数闭包捕获的 `datasetId` 是「这个 effect 创建时」的值（即"刚离开"的那个），所以 store 的 key 是正确的。但 `messages` 如果直接闭包捕获是 stale 的——必须通过 `messagesRef.current` 拿最新值。
+```tsx
+// ChatPanel: 加载中显示 skeleton（避免 EmptyState 误导）
+{isLoadingHistory ? <HistorySkeleton /> : messages.length === 0 ? <EmptyState ... /> : ...}
+
+// useLayoutEffect 在 DOM 提交后、paint 前同步定位到底
+useLayoutEffect(() => {
+  const justFinishedLoading = prevLoadingRef.current && !isLoadingHistory
+  prevLoadingRef.current = isLoadingHistory
+  if (isLoadingHistory) return
+  if (justFinishedLoading) {
+    el.scrollTop = el.scrollHeight  // 瞬时，浏览器永远不 paint 顶部那一帧
+    return
+  }
+  // 新消息 / 流式逻辑见 §4.2
+}, [messages, isLoadingHistory])
+```
+
+**关键认知**：
+
+- **`useLayoutEffect` 在 paint 前同步执行**：scrollTop 设置时浏览器还没绘制，用户看不到"内容在顶部"的中间帧
+- **不需要 storeRef Map**：Supabase 已经是真相源，切换 dataset 直接 fetch 即可（前端会话内可加 useRef Map 缓存避免重复 fetch，但 dataset 列表通常不大，不必要）
+- **prevLoadingRef 检测 transition**：`isLoadingHistory` true → false 那一帧才触发"瞬时定位到底"，避免每次 effect 都 reset 滚动位置
 
 ### 3.7 双主题 token 系统
 
@@ -795,44 +880,66 @@ messages.push(replyMsg)
 - 抽象层应保持 OpenAI 主类型，扩展字段用类型断言挂载。
 - 如果未来抽象更复杂，可以引入"provider-specific 钩子"模式（钩子在 send 前/后改 message）。
 
-### 4.2 流式滚动 sticky-to-bottom
+### 4.2 流式滚动 sticky-to-bottom（三场景）
 
-**问题**：朴素的 `distanceFromBottom < 120 ? scrollTop = scrollHeight` 在两种场景失效：
-1. 流式回复时大块内容（图表卡片几百 px）一次性加入 → distance 跳到几百 → 判定"不接近底部" → 不跟随
+**问题**：聊天 app 滚动看起来简单实际很坑——
+1. 流式回复时大块内容（图表卡片几百 px）一次性加入 → 距离阈值瞬间超限 → 不跟随
 2. 用户翻到上面再发新消息 → 同样不跟随
+3. 切换 dataset 历史一次性加载 → 浏览器先 paint 一帧"顶部"再滚到底（肉眼可见的闪烁）
 
-**解决**（`components/chat/ChatPanel.tsx:23-58`）：
+**解决**（`components/chat/ChatPanel.tsx`）：sticky 状态由用户滚动维护 + `useLayoutEffect` 三场景区分。
 
 ```ts
-const stickyRef = useRef(true)
+const stickyRef = useRef(true)            // 由 onScroll 维护
+const prevCountRef = useRef(0)
+const prevLoadingRef = useRef(false)      // 检测 isLoadingHistory transition
 
-// 1. onScroll 维护 sticky 状态（用户主动滚动才更新）
-//    scrollHeight 变化不触发 scroll 事件，所以程序滚动不污染
+// 1. 用户滚动时维护 sticky（scrollHeight 变化不触发 scroll，所以程序滚动不污染）
 useEffect(() => {
   const onScroll = () => {
-    const distance = scrollHeight - scrollTop - clientHeight
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
     stickyRef.current = distance < 60
   }
   el.addEventListener('scroll', onScroll, { passive: true })
   return () => el.removeEventListener('scroll', onScroll)
 }, [])
 
-// 2. messages 变化时按规则跟随
-useEffect(() => {
-  const isNewMessage = messages.length > prevCountRef.current
-  if (isNewMessage) {
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })  // 自然
+// 2. useLayoutEffect 同步定位（paint 前执行，无可见中间帧）
+useLayoutEffect(() => {
+  const justFinishedLoading = prevLoadingRef.current && !isLoadingHistory
+  prevLoadingRef.current = isLoadingHistory
+  if (isLoadingHistory) return
+
+  // 场景 ①：切换 dataset 加载完 → 瞬时定位到底（不 smooth，不闪顶部）
+  if (justFinishedLoading) {
+    el.scrollTop = el.scrollHeight
     stickyRef.current = true
-  } else if (stickyRef.current) {
-    el.scrollTop = el.scrollHeight  // 瞬时（避免动画排队）
+    prevCountRef.current = messages.length
+    return
   }
-}, [messages])
+
+  // 场景 ②：用户发新消息（messages.length 增加）→ smooth 滚动（视觉自然）
+  const isNewMessage = messages.length > prevCountRef.current
+  prevCountRef.current = messages.length
+  if (isNewMessage) {
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    stickyRef.current = true
+    return
+  }
+
+  // 场景 ③：流式更新（同条 message 在变）→ sticky 时瞬时跟（避免动画排队）
+  if (stickyRef.current) {
+    el.scrollTop = el.scrollHeight
+  }
+}, [messages, isLoadingHistory])
 ```
 
 **面试讲点**：
 
-- 关键认知：**scrollHeight 变化不触发 scroll 事件**——只有 scrollTop 改变才会。这让 sticky 状态可以只由用户行为维护，与程序滚动解耦。
-- 区分"新消息"（smooth 滑入）和"流式更新"（瞬时跟）是体验上的精修。
+- **关键认知 1**：`scrollHeight` 变化不触发 scroll 事件——只有 `scrollTop` 改变才触发。这让 sticky 状态可以只由用户行为维护，与程序滚动解耦。
+- **关键认知 2**：`useLayoutEffect` vs `useEffect`——前者在 paint 前同步执行，scrollTop 设置时浏览器还没绘制，**用户永远看不到"顶部"的中间帧**。这种"60fps 应用的极致打磨"是高级前端的标志。
+- **三场景区分**：体感差异巨大。新消息 smooth 滑入有"自然感"，加载完瞬时定位有"专业感"，流式瞬时跟避免"动画排队卡顿"。
+- **状态机抽象**：把"是不是新消息"、"是不是刚加载完"两个 transition 提到 ref 跟踪，比每次硬算 distance 更稳定。
 
 ### 4.3 SVG 图表内嵌报告
 
@@ -918,7 +1025,7 @@ vm.runInContext(`(() => { ${code} })()`, { rows, Math, Object, ... }, { timeout:
 - **演进意识**：vm → SQLite 的迁移是"看到风险 + 主动重构"，不是"一上来就完美"。讲故事比一上来就声称用最完美方案有说服力
 - **为什么不用 DuckDB**：见 5.9 踩坑——包体积爆 Vercel hobby 50MB 限制
 
-### 4.6 LLM 动态生成提问建议（替代硬编码模板）
+### 4.5 LLM 动态生成提问建议（替代硬编码模板）
 
 **问题**：EmptyState 显示的"示例问题"原本是硬编码 `EXAMPLE_QUESTIONS`，每个 dataset 都显示同样的"哪个区域销售额最高？"——切到员工数据集时这套问题完全不适用。
 
@@ -985,7 +1092,7 @@ const suggestions = llmSuggestions ?? templateSuggestions  // 模板 fallback
 - 这是个**"模板 vs LLM"的工程权衡**：模板免费但生硬，LLM 自然但慢且要钱。最终方案两个都用——模板做即时 fallback，LLM 做异步增强
 - **缓存层次**：会话内 useRef Map（最快） → 失败时回退到模板 → 多层防御
 
-### 4.5 报告格式选型：HTML 而非 Markdown / PDF
+### 4.6 报告格式选型：HTML 而非 Markdown / PDF
 
 **问题**：刚开始下载是 `.md`，但非技术用户双击 `.md` 文件用 TextEdit / 记事本打开是裸源码（`# 标题` `**加粗**`），不美观。
 
@@ -1015,17 +1122,17 @@ const suggestions = llmSuggestions ?? templateSuggestions  // 模板 fallback
 
 详见 4.1。**教训**：API 兼容 ≠ 完全一致，扩展字段要回 echo。
 
-### 5.2 HMR 内存 Map 清空
+### 5.2 HMR 内存 Map 清空 ✅ 已解决
 
-**位置**：`lib/dataset-store.ts` 模块级 `Map`
+**位置**：~~`lib/dataset-store.ts` 模块级 `Map`~~
 
-**症状**：开发时改一行代码，dev server HMR 重载，上传过的数据集全没了。
+**症状**：~~开发时改一行代码，dev server HMR 重载，上传过的数据集全没了~~
 
-**原因**：Next.js HMR 会重新执行模块顶层代码，模块级 `let store = new Map()` 又被重新赋值。
+**根因**：Next.js HMR 会重新执行模块顶层代码，模块级 `let store = new Map()` 又被重新赋值。
 
-**当前应对**：接受这个开发期不便。生产 `next start` 单实例运行无问题。Phase 3 Supabase 持久化彻底解决。
+**解决**：随 §5.10 Serverless 内存隔离一起迁移到 Supabase 持久化。模块级 Map 已删除，HMR 不再丢数据。
 
-**面试讲点**：能讲出"我们知道这是局限、生产无影响、有明确的演进路径"比"我不知道这个问题"强 10 倍。
+**面试讲点**：本来是"知道局限 + 接受 + 明确演进路径"的回答模板，迁移后变成完整故事——同一份持久化层既解决生产问题（5.10）也解决开发体验（5.2），**一举两得**。
 
 ### 5.3 TextDecoder UTF-8 切断
 
@@ -1053,15 +1160,20 @@ const suggestions = llmSuggestions ?? templateSuggestions  // 模板 fallback
 
 详见 4.3。**教训**：LLM 的"认知误差"用 prompt 约束 + 代码兜底双层修。
 
-### 5.7 xlsx CVE 0.18.5
+### 5.7 xlsx CVE 0.18.5 ✅ 已解决
 
-**风险**：CVE-2023-30533（prototype pollution）、CVE-2024-22363（ReDoS）。
+**风险**：~~CVE-2023-30533（prototype pollution）、CVE-2024-22363（ReDoS）~~
 
-**当前应对**：CSV 不受影响（用 papaparse），Excel 受影响但 Phase 1/2 demo 攻击面窄。**Phase 3 上线前必须升级或换 exceljs**。
+**根因**：xlsx@0.18.x 是 SheetJS 在 npm 上的最后一版，后续版本只通过 SheetJS 自家 CDN 分发，npm 上的版本永远卡在带 CVE 的版本。
 
-**面试讲点**："我知道这个 CVE 存在，知道影响面、知道 Phase 3 怎么解决"——这是真实工程师的回答，不是"我没注意到"。
+**解决**：换 `exceljs`（活跃维护、npm 主源、无 CVE）。改造点：
+- `parseExcel` 改 async（exceljs API 异步）
+- exceljs 行 index 从 1 开始，`row.values[0]` 是 undefined，要 slice(1)
+- 去掉 `.xls`（二进制 Office 2003 格式，exceljs 仅支持 OOXML xlsx）
 
-### 5.9 DuckDB 包体积爆 Vercel hobby function 限制
+**面试讲点**：CVE 不是"凑活用 + 留个 TODO"，是真的换包。讲故事时强调"我评估了影响面（CSV 不受影响、xls 用户极少）+ 选了合适替代（exceljs 活跃 + 兼容性够）+ 接受了 .xls 不再支持的代价"——**完整的工程决策链**。
+
+### 5.8 DuckDB 包体积爆 Vercel hobby function 限制
 
 **症状**：要替换 vm 沙箱，第一选择是 DuckDB（最强 OLAP 引擎）。`npm install @duckdb/node-api` 后看 `node_modules/@duckdb`：**115MB**。
 
@@ -1094,7 +1206,7 @@ serverExternalPackages: ['better-sqlite3']
 - **决策框架**：包体积、平台限制、维护活跃度——三选一不够，最好三个都过
 - 写在 LEARNING 里：选型试错过程比"一上来就用对"更有信服力
 
-### 5.10 模板硬拼列名生硬
+### 5.9 模板硬拼列名生硬
 
 **症状**：示例问题"哪个 region 的 units 最高？" —— 中文 + 英文列名混搭让句子割裂，用户读起来不顺。
 
@@ -1111,7 +1223,7 @@ LLM 看到反例后会主动避开。
 
 **教训**：**用 LLM 时不要只给正例**，给反例往往效果更好（指出"这种不要"比"这种要"更有约束力，因为反例稀少）。
 
-### 5.8 Vercel Serverless 跨函数内存隔离
+### 5.10 Vercel Serverless 跨函数内存隔离
 
 **症状**：本地 dev 一切正常，部署 Vercel 后报"数据集不存在"。用户上传 → 立刻提问，但 agent 看不到 dataset。
 
@@ -1189,11 +1301,11 @@ LLM 看到反例后会主动避开。
 
 > 现状：
 > - 解析阶段 papaparse 流式没问题。
-> - 存储阶段：10w 行 JS 对象大约几十 MB，单实例内存能扛但不优雅。
-> - 分析阶段：vm 跑 JS 遍历 10w 行毫秒级。
-> - **真正瓶颈**是发给 LLM 的 sample 数据——`inspect_data` 只发 3 行，`run_analysis` 拿到聚合结果（已经几十行级别）。LLM 上下文窗口不爆。
+> - 存储阶段：10w 行 JSONB 存 Supabase（单字段上限 1GB），完全够。
+> - 分析阶段：`better-sqlite3 :memory:` 加载 + 跑 SQL，10w 行毫秒级（事务包裹批量 INSERT 比逐行快 10x+）。
+> - **真正瓶颈**是发给 LLM 的 sample 数据——`inspect_data` 只发 3 行，`run_analysis` 拿到聚合结果（已经几十行级别）+ 自动截断到 30 项。LLM 上下文窗口不爆。
 >
-> 演进：行数 >100w 时上 DuckDB（in-process OLAP），把 run_analysis 改成 SQL 生成。
+> 演进：行数 >100w 时上 DuckDB（更强 OLAP），但要先升 Vercel Pro plan（DuckDB 包 115 MB 爆 Hobby 50 MB function 限制，详见 5.8）。
 
 **Q：tool result 很大（几万行）会撑爆上下文吗？**
 
@@ -1244,19 +1356,31 @@ LLM 看到反例后会主动避开。
 
 ### 6.3 安全类
 
-**Q：vm 安全吗？**
+**Q：你这个 SQL 沙箱安全吗？为什么不用 vm？**
 
-> 不是真沙箱，PROGRESS.md L2 标了。缓解：globals 白名单（无 process/require/fs/setTimeout/Promise）、5s timeout、breakOnSigint。Phase 3 上线前必须接 E2B（远程 Docker 隔离）。
+> 第一版用过 vm，后来换成 **better-sqlite3 `:memory:`**。
 >
-> 这种"知道局限 + 明确演进路径"的回答比"我以为是安全的"强。
+> **vm 的问题**：
+> 1. **不是真沙箱**：历史有上下文逃逸 CVE，globals 白名单也只是缓解
+> 2. **能力弱**：LLM 写 group by 啰嗦，且偶尔错变量名
+>
+> **当前 SQLite 方案的三层防御**：
+> 1. SQL 必须 `SELECT` 或 `WITH` 开头（runtime 检查）
+> 2. 正则拒绝 DDL/DML 关键字（DROP/DELETE/UPDATE/INSERT/ALTER/ATTACH/PRAGMA）
+> 3. `:memory:` per-query，用完即销毁——无状态泄漏
+>
+> **为什么 SQLite 比 vm 安全得多**：SQLite 是世界上**最被审计过的 DB 之一**（FAA / iOS / Android / Firefox 都用），漏洞响应也比 vm 快得多。
+>
+> **如果还要更严格**：下一步上 E2B 沙箱（远程 Docker 容器隔离），可以跑真 Python pandas。但需要付费 API key，demo 用不上。
 
 **Q：用户上传的 CSV 如果有恶意内容会怎样？**
 
 > 几种威胁面：
-> 1. **解析阶段 ReDoS**：xlsx 0.18.5 有 CVE-2024-22363。CSV 用 papaparse 没此问题。
-> 2. **Prototype pollution**：xlsx 0.18.5 CVE-2023-30533。同上面，CSV 不受影响。
-> 3. **超大文件 DoS**：当前没文件大小限制（PROGRESS.md 4.6 标了待办）。生产应在 API Route 校验。
+> 1. **解析阶段 ReDoS**：~~xlsx 0.18.5 有 CVE-2024-22363~~ 已换 exceljs，无此问题
+> 2. **Prototype pollution**：~~xlsx 0.18.5 CVE-2023-30533~~ 同上，已换
+> 3. **超大文件 DoS**：API Route 已加 20MB 限制
 > 4. **数据进入 LLM**：3 行 sample 进 prompt，理论上 prompt injection 可能。但工具调用范围是受控的（只能调我们定义的 4 个），影响有限。
+> 5. **SQL injection**：用户不直接写 SQL，是 LLM 生成，且过三层校验（详见上一题）
 
 **Q：API key 怎么管？**
 
@@ -1311,9 +1435,20 @@ LLM 看到反例后会主动避开。
 >
 > 维护成本反而比"先 any 用着" 低很多，因为重构时编译器告诉我每一处该改。
 
-**Q：useEffect 切换 dataset 的 cleanup 模式有什么坑？**
+**Q：切换 dataset 的体验细节有哪些？**
 
-详见 3.6。核心：cleanup 闭包的 `datasetId` 是"刚离开的"那个；但 `messages` 必须用 ref 拿最新值（stale closure 问题）。
+> 详见 §3.6。三个关键点：
+> 1. **加载 skeleton**：`isLoadingHistory: true` 时显示骨架占位，避免 EmptyState "开始分析" 闪一下误导用户
+> 2. **`useLayoutEffect` 同步定位**：在 paint 前 set scrollTop = scrollHeight，浏览器永远不绘制"内容在顶部"的中间帧
+> 3. **`prevLoadingRef` 跟踪 transition**：只在 `isLoadingHistory: true → false` 那一帧瞬时定位，避免每次 effect 都 reset 位置
+
+**Q：演进前用过 stale closure 模式吗？踩过什么坑？**
+
+> 用过。Phase 2 时前端用 `storeRef<Map>` 在 hook 内做 per-dataset 历史缓存，`useEffect` 的 cleanup 函数把当前 state 存回 store。坑是：cleanup 闭包捕获的 `messages` 是**创建 effect 时的快照**（stale），必须通过 `messagesRef.current` 拿最新值。
+>
+> **现在已经不需要这套模式**——上 Supabase 后切换 dataset 直接 `fetch /api/messages`，DB 是真相源，hook 大幅简化。
+>
+> 这是个**演进意识**的好故事：第一版功能驱动、第二版上线驱动；遇到的"陷阱"会随架构演进自然消失。
 
 **Q：为什么不用 Zustand / Redux 这类全局状态？**
 
