@@ -145,3 +145,83 @@ export async function clearConversation(datasetId: string): Promise<void> {
     .eq('dataset_id', datasetId)
   if (error) throw new Error(`清空对话失败：${error.message}`)
 }
+
+/**
+ * 按 ui.id 删除一条对话消息，**配对删除**。
+ *
+ * 为什么配对：OpenAI 协议要求 user / assistant 配对，单独删 user 会留下"孤立
+ * assistant"——下次 loadConversation 拼出的 LLM messages 数组就不合法（assistant
+ * 前面没有 user 触发），后端发请求会 400。
+ *
+ * 配对规则：
+ *   - 删 user → 同时删它**之后**第一条 assistant（按 created_at）
+ *   - 删 assistant → 同时删它**之前**最后一条 user
+ *   - 如果找不到配对（孤立消息），单独删
+ *
+ * 注意：前端的 message.id 是 ui jsonb 字段里的 UUID，不是 DB row id，
+ * 所以查询用 `ui->>id` JSONB 路径操作符。
+ *
+ * 返回被删消息的 ui.id 列表，前端用它从 React state 移除对应消息。
+ */
+export async function deleteMessagePair(
+  uiMessageId: string,
+): Promise<string[]> {
+  const supabase = getSupabase()
+
+  // 1. 按 ui.id 找该消息（DB 字段查询：ui->>id 操作符提取 JSONB 内的 id）
+  const { data: msg, error: e1 } = await supabase
+    .from('messages')
+    .select('id, dataset_id, role, ui, created_at')
+    .eq('ui->>id', uiMessageId)
+    .maybeSingle<{
+      id: string
+      dataset_id: string
+      role: 'user' | 'assistant'
+      ui: ChatMessage
+      created_at: string
+    }>()
+
+  if (e1) throw new Error(`查询消息失败：${e1.message}`)
+  if (!msg) throw new Error('消息不存在')
+
+  // 2. 找配对消息（按时间相邻）
+  type PairedRow = { id: string; ui: ChatMessage }
+  let pairedRow: PairedRow | null = null
+
+  if (msg.role === 'user') {
+    const { data } = await supabase
+      .from('messages')
+      .select('id, ui')
+      .eq('dataset_id', msg.dataset_id)
+      .eq('role', 'assistant')
+      .gt('created_at', msg.created_at)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle<PairedRow>()
+    pairedRow = data
+  } else {
+    const { data } = await supabase
+      .from('messages')
+      .select('id, ui')
+      .eq('dataset_id', msg.dataset_id)
+      .eq('role', 'user')
+      .lt('created_at', msg.created_at)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle<PairedRow>()
+    pairedRow = data
+  }
+
+  // 3. 一起删（按 DB row id；JSONB 字段查询无法直接用于 IN 列表）
+  const dbIdsToDelete = pairedRow ? [msg.id, pairedRow.id] : [msg.id]
+  const { error: e2 } = await supabase
+    .from('messages')
+    .delete()
+    .in('id', dbIdsToDelete)
+  if (e2) throw new Error(`删除消息失败：${e2.message}`)
+
+  // 4. 返回前端 ui.id 列表
+  const uiIdsDeleted = [msg.ui.id]
+  if (pairedRow) uiIdsDeleted.push(pairedRow.ui.id)
+  return uiIdsDeleted
+}

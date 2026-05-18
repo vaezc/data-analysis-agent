@@ -48,6 +48,8 @@ interface UseAgentReturn {
   clearError: () => void
   /** 清空当前数据集的对话（前端 state + DB）。"New Chat" 按钮调用。 */
   reset: () => Promise<void>
+  /** 删除指定 ui.id 的消息（配对删除）。前端 message hover 时显示的 trash 按钮调用。 */
+  deleteMessage: (messageId: string) => Promise<void>
 }
 
 export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
@@ -212,6 +214,25 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
 
   const clearError = useCallback(() => setError(null), [])
 
+  const deleteMessage = useCallback(async (messageId: string) => {
+    try {
+      const res = await fetch(
+        `/api/messages/${encodeURIComponent(messageId)}`,
+        { method: 'DELETE' },
+      )
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(body.error ?? `HTTP ${res.status}`)
+      }
+      const data = (await res.json()) as { deletedIds: string[] }
+      // 从前端 state 移除被删的消息（配对删除可能返回 1 或 2 条 id）
+      setMessages((prev) => prev.filter((m) => !data.deletedIds.includes(m.id)))
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setError(`删除消息失败：${msg}`)
+    }
+  }, [])
+
   return {
     messages,
     send,
@@ -220,6 +241,7 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
     error,
     clearError,
     reset,
+    deleteMessage,
   }
 }
 

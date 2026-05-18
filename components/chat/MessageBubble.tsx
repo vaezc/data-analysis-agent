@@ -1,5 +1,6 @@
 'use client'
 
+import { Trash2 } from 'lucide-react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { ChatMessage } from '@/types'
@@ -13,16 +14,20 @@ interface MessageBubbleProps {
   isStreaming?: boolean
   /** 是否是最后一条消息（thinking indicator 只在最后一条显示） */
   isLast?: boolean
+  /** 删除该消息（配对删除会同时删配对的另一条）。传 undefined 则不显示删除按钮 */
+  onDelete?: () => void
 }
 
 export function MessageBubble({
   message,
   isStreaming = false,
   isLast = false,
+  onDelete,
 }: MessageBubbleProps) {
   if (message.role === 'user') {
     return (
-      <div className="flex justify-end animate-message-in">
+      <div className="flex justify-end animate-message-in group/msg relative">
+        {onDelete && <DeleteButton align="left" onClick={onDelete} />}
         <div className="max-w-[80%] space-y-2">
           {/* 附加图片：放在文字气泡上方，与用户气泡右对齐 */}
           {message.images && message.images.length > 0 && (
@@ -54,7 +59,8 @@ export function MessageBubble({
   const showThinking = isStreaming && isLast && noContent && noRunningStep
 
   return (
-    <div className="flex gap-3 animate-message-in">
+    <div className="flex gap-3 animate-message-in group/msg relative">
+      {onDelete && <DeleteButton align="right" onClick={onDelete} />}
       {/* AI 头像 —— 用品牌图，背景放大居中让机器人主体填满圆形 */}
       <div
         className="size-8 shrink-0 rounded-full bg-no-repeat shadow-sm shadow-fg/10"
@@ -91,6 +97,28 @@ export function MessageBubble({
         {showThinking && <ThinkingIndicator />}
       </div>
     </div>
+  )
+}
+
+// 配对删除按钮：用 group-hover/msg 跟随父消息容器的 hover 状态出现
+// align=left 用于 user 气泡（右对齐 → 按钮放左侧）；align=right 用于 assistant
+function DeleteButton({
+  align,
+  onClick,
+}: {
+  align: 'left' | 'right'
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label="删除此条对话（配对一起删）"
+      title="删除此条对话（配对的 user/assistant 会一起删除）"
+      className={`absolute top-0 ${align === 'left' ? 'left-0' : 'right-0'} inline-flex size-7 items-center justify-center rounded-md text-fg-subtle opacity-0 transition duration-150 group-hover/msg:opacity-100 hover:bg-danger/10 hover:text-danger focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40`}
+    >
+      <Trash2 className="size-3.5" strokeWidth={1.75} />
+    </button>
   )
 }
 

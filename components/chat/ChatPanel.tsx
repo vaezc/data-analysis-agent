@@ -150,9 +150,20 @@ export function ChatPanel({ datasetId, columns }: ChatPanelProps) {
     error,
     clearError,
     reset,
+    deleteMessage,
   } = useAgent({
     datasetId,
   });
+
+  const handleDeleteMessage = async (messageId: string) => {
+    if (
+      !confirm(
+        '确定删除这条对话？\n配对的 user/assistant 消息会一起删除，不可恢复。',
+      )
+    )
+      return;
+    await deleteMessage(messageId);
+  };
   const [isResetting, setIsResetting] = useState(false);
 
   const handleNewChat = async () => {
@@ -288,6 +299,10 @@ export function ChatPanel({ datasetId, columns }: ChatPanelProps) {
                 message={m}
                 isStreaming={isStreaming}
                 isLast={i === messages.length - 1}
+                // streaming 期间禁删，防止删进行中的（DB 还没存 assistant，会 404）
+                onDelete={
+                  isStreaming ? undefined : () => handleDeleteMessage(m.id)
+                }
               />
             ))
           )}
