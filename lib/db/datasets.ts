@@ -1,22 +1,20 @@
 // ============================================================
-// 数据集存储与解析
+// 数据集存储与解析（Prisma 版）
 //
-// 解析逻辑（CSV/Excel 解析 + 列类型推断 + 值转换）保留不变。
-// 存储改用 Supabase（Phase 3）：
-//   - 解决 Vercel Serverless 跨函数内存隔离问题
-//   - 支持刷新页面 / 多 tab / 跨设备访问历史 dataset
+// 替代 lib/dataset-store.ts。公开 API 函数签名完全兼容，
+// 调用方（app/api/upload、app/api/datasets、app/api/datasets/[id]）无需改动。
 //
-// 公开 API（全部异步）：
-//   createDataset()       上传 → 解析 → 入 Supabase datasets 表
-//   getDataset()          完整数据（含 rows）
-//   getDatasetSummary()   inspect_data 工具的返回结构
-//   listDatasets()        前端侧边栏用，不含 rows
-//   deleteDataset()       删除（级联删除 messages，由外键 on delete cascade 完成）
+// 设计要点：
+//   - 解析逻辑（CSV/Excel + 类型推断 + 值转换）保留不变
+//   - DB 访问改用 Prisma client
+//   - listDatasets 用 Postgres jsonb_array_length 算 rowCount（O(1)，
+//     基于 JSONB header 计数，无需 load 整个 rows 数组），避免侧边栏拉几十 MB
+//   - columns / rows 是 Prisma Json 类型（实际就是 JSONB），通过 cast 还原成 TS 类型
 // ============================================================
 
 import ExcelJS from 'exceljs'
 import Papa from 'papaparse'
-import { getSupabase } from '@/lib/supabase'
+import { prisma } from '@/lib/prisma'
 import type {
   Column,
   ColumnType,
@@ -60,7 +58,9 @@ async function parseExcel(buffer: Buffer): Promise<RawTable> {
   const workbook = new ExcelJS.Workbook()
   // exceljs 的 Buffer 类型定义与 @types/node 24+ 的 Buffer 类型冲突
   // （ArrayBufferLike 泛型差异），运行时完全兼容，断言绕过即可
-  await workbook.xlsx.load(buffer as unknown as Parameters<typeof workbook.xlsx.load>[0])
+  await workbook.xlsx.load(
+    buffer as unknown as Parameters<typeof workbook.xlsx.load>[0],
+  )
   const sheet = workbook.worksheets[0]
   if (!sheet) throw new Error('Excel 文件没有 sheet')
 
@@ -137,38 +137,27 @@ function coerceValue(value: string, type: ColumnType): unknown {
 }
 
 // ============================================================
-// Supabase 表行 ↔ Dataset 转换
-//
-// DB 字段命名（snake_case）→ TS（camelCase）；created_at（ISO string）→ ms timestamp
-// ============================================================
-
-interface DatasetRow {
-  id: string
-  name: string
-  columns: Column[]
-  rows: Row[]
-  row_count: number
-  created_at: string
-}
-
-function rowToDataset(row: DatasetRow): Dataset {
-  return {
-    id: row.id,
-    name: row.name,
-    columns: row.columns,
-    rows: row.rows,
-    createdAt: new Date(row.created_at).getTime(),
-  }
-}
-
-// ============================================================
 // 公开 API
 // ============================================================
 
 /**
+ * 数据集元信息（不含 rows）。与前端 UploadedDataset 形态对齐，
+ * 同时被 /api/upload 响应和 /api/datasets GET 复用。
+ */
+export interface DatasetMeta {
+  id: string
+  name: string
+  columns: Column[]
+  rowCount: number
+  createdAt: number
+}
+
+/**
  * 解析上传的文件并入库。filename 用来判断 CSV/Excel 与展示。
+ * userId：当前登录用户 —— 由调用方从 session 拿，决定数据所属。
  */
 export async function createDataset(
+  userId: string,
   filename: string,
   buffer: Buffer,
 ): Promise<Dataset> {
@@ -202,92 +191,112 @@ export async function createDataset(
     return row
   })
 
-  const supabase = getSupabase()
-  const { data, error } = await supabase
-    .from('datasets')
-    .insert({
+  const created = await prisma.dataset.create({
+    data: {
+      userId,
       name: filename,
-      columns,
-      rows,
-      row_count: rows.length,
-    })
-    .select('*')
-    .single<DatasetRow>()
+      // Prisma Json 字段接受任意可序列化对象；运行时存为 JSONB
+      columns: columns as unknown as object,
+      rows: rows as unknown as object,
+    },
+  })
 
-  if (error) throw new Error(`保存数据集失败：${error.message}`)
-  return rowToDataset(data)
-}
-
-export async function getDataset(id: string): Promise<Dataset | undefined> {
-  const supabase = getSupabase()
-  const { data, error } = await supabase
-    .from('datasets')
-    .select('*')
-    .eq('id', id)
-    .maybeSingle<DatasetRow>()
-
-  if (error) throw new Error(`查询数据集失败：${error.message}`)
-  if (!data) return undefined
-  return rowToDataset(data)
-}
-
-export async function getDatasetSummary(
-  id: string,
-): Promise<DatasetSummary | undefined> {
-  // 只取必要字段；sampleRows 用 JSONB 切片函数从 rows 取前 3 个，避免拉全量
-  // Supabase 不支持直接的 JSONB 片段查询，所以仍拉 rows 后在内存切。
-  // 单表 1GB JSONB 上限，几千行 dataset 量级查询毫秒级，可接受。
-  const supabase = getSupabase()
-  const { data, error } = await supabase
-    .from('datasets')
-    .select('id, name, columns, rows, row_count')
-    .eq('id', id)
-    .maybeSingle<Pick<DatasetRow, 'id' | 'name' | 'columns' | 'rows' | 'row_count'>>()
-
-  if (error) throw new Error(`查询数据集失败：${error.message}`)
-  if (!data) return undefined
   return {
-    dataset_id: data.id,
-    name: data.name,
-    columns: data.columns,
-    rowCount: data.row_count,
-    sampleRows: data.rows.slice(0, 3),
+    id: created.id,
+    name: created.name,
+    columns,
+    rows,
+    createdAt: created.createdAt.getTime(),
   }
 }
 
 /**
- * 数据集元信息（不含 rows）。与前端 UploadedDataset 形态对齐，
- * 同时被 /api/upload 响应和 /api/datasets GET 复用。
+ * 拿单个数据集（必须传 userId 做 owner check，防越权）。
+ * 找不到 / 不属于该 user 都返回 undefined —— 调用方靠返回值判 404。
  */
-export interface DatasetMeta {
-  id: string
-  name: string
-  columns: Column[]
-  rowCount: number
-  createdAt: number
-}
-
-export async function listDatasets(): Promise<DatasetMeta[]> {
-  const supabase = getSupabase()
-  const { data, error } = await supabase
-    .from('datasets')
-    .select('id, name, columns, row_count, created_at')
-    .order('created_at', { ascending: false })
-
-  if (error) throw new Error(`列举数据集失败：${error.message}`)
-
-  type ListRow = Pick<DatasetRow, 'id' | 'name' | 'columns' | 'row_count' | 'created_at'>
-  return (data as ListRow[]).map((row) => ({
+export async function getDataset(
+  id: string,
+  userId: string,
+): Promise<Dataset | undefined> {
+  // findFirst（不是 findUnique）—— 复合条件 (id, userId) 不是唯一索引
+  const row = await prisma.dataset.findFirst({ where: { id, userId } })
+  if (!row) return undefined
+  return {
     id: row.id,
     name: row.name,
-    columns: row.columns,
-    rowCount: row.row_count,
-    createdAt: new Date(row.created_at).getTime(),
+    columns: row.columns as unknown as Column[],
+    rows: row.rows as unknown as Row[],
+    createdAt: row.createdAt.getTime(),
+  }
+}
+
+export async function getDatasetSummary(
+  id: string,
+  userId: string,
+): Promise<DatasetSummary | undefined> {
+  const row = await prisma.dataset.findFirst({
+    where: { id, userId },
+    select: { id: true, name: true, columns: true, rows: true },
+  })
+  if (!row) return undefined
+  const rows = row.rows as unknown as Row[]
+  return {
+    dataset_id: row.id,
+    name: row.name,
+    columns: row.columns as unknown as Column[],
+    rowCount: rows.length,
+    sampleRows: rows.slice(0, 3),
+  }
+}
+
+/**
+ * 列当前用户的所有数据集。
+ * 用 Postgres 原生 jsonb_array_length 算 rowCount（O(1)，基于 JSONB header），
+ * 避免拉全量 rows JSONB。这是这一层最关键的性能优化点。
+ *
+ * 不能用 prisma.dataset.findMany + select 拿到 row_count——
+ * Prisma 不支持 Json 字段的 length 子查询。所以走 $queryRaw。
+ */
+export async function listDatasets(userId: string): Promise<DatasetMeta[]> {
+  const rows = await prisma.$queryRaw<
+    {
+      id: string
+      name: string
+      columns: unknown
+      row_count: bigint
+      created_at: Date
+    }[]
+  >`
+    SELECT
+      id,
+      name,
+      columns,
+      jsonb_array_length(rows) AS row_count,
+      created_at
+    FROM datasets
+    WHERE user_id = ${userId}
+    ORDER BY created_at DESC
+  `
+
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    columns: row.columns as Column[],
+    // jsonb_array_length 返回 bigint（Postgres int8），TS 端转 number
+    rowCount: Number(row.row_count),
+    createdAt: row.created_at.getTime(),
   }))
 }
 
-export async function deleteDataset(id: string): Promise<void> {
-  const supabase = getSupabase()
-  const { error } = await supabase.from('datasets').delete().eq('id', id)
-  if (error) throw new Error(`删除数据集失败：${error.message}`)
+/**
+ * 删除数据集（必须 owner check）。
+ * 用 deleteMany + 复合 where 一步搞定 —— 不属于该 user 的数据集 count=0 不报错。
+ * 调用方需要"删了 0 条"也算 404 时，可以检查返回值，但当前路由直接 200。
+ */
+export async function deleteDataset(
+  id: string,
+  userId: string,
+): Promise<{ count: number }> {
+  // 级联删除 messages 由 schema 的 onDelete: Cascade 自动处理
+  return prisma.dataset.deleteMany({ where: { id, userId } })
 }

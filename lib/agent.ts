@@ -53,6 +53,8 @@ const SYSTEM_PROMPT = `你是一个数据分析 Agent，帮助用户分析 CSV/E
 export interface RunAgentParams {
   /** 当前对话激活的数据集 ID */
   datasetId: string
+  /** 当前登录用户 ID —— 用于工具执行时 owner check */
+  userId: string
   /** 用户当前轮的消息 */
   userMessage: string
   /** 用户附带的图片 data URLs（vision multimodal；需要 vision-capable LLM） */
@@ -66,6 +68,7 @@ export interface RunAgentParams {
 export async function runAgent(params: RunAgentParams): Promise<void> {
   const {
     datasetId,
+    userId,
     userMessage,
     userImages,
     previousMessages = [],
@@ -98,7 +101,7 @@ export async function runAgent(params: RunAgentParams): Promise<void> {
     userMessageParam,
   ]
 
-  const ctx: ToolExecutionContext = { emit: onEvent }
+  const ctx: ToolExecutionContext = { emit: onEvent, userId }
 
   // 本轮开始时 messages 的长度（system + 历史），用于 done 事件计算"本轮新增"的切片
   const baseLength = messages.length - 1 // 减去刚 push 的 user message，让本轮新增从 user 开始
@@ -109,6 +112,7 @@ export async function runAgent(params: RunAgentParams): Promise<void> {
       const stream = await chatCompletionStream({
         messages,
         tools: TOOL_LIST,
+        debugTag: `agent step=${step}`,
       })
 
       let contentBuffer = ''

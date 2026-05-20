@@ -7,7 +7,8 @@
 // ============================================================
 
 import { NextResponse } from 'next/server'
-import { deleteMessagePair } from '@/lib/messages-store'
+import { auth } from '@/auth'
+import { deleteMessagePair } from '@/lib/db/messages'
 
 export const runtime = 'nodejs'
 
@@ -15,6 +16,14 @@ export async function DELETE(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const session = await auth()
+  if (!session?.user?.id) {
+    return NextResponse.json(
+      { error: '请先登录', code: 'UNAUTHENTICATED' },
+      { status: 401 },
+    )
+  }
+
   const { id } = await params
   if (!id) {
     return NextResponse.json(
@@ -24,7 +33,7 @@ export async function DELETE(
   }
 
   try {
-    const deletedIds = await deleteMessagePair(id)
+    const deletedIds = await deleteMessagePair(id, session.user.id)
     return NextResponse.json({ deletedIds })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)

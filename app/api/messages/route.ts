@@ -9,11 +9,20 @@
 // ============================================================
 
 import { type NextRequest, NextResponse } from 'next/server'
-import { clearConversation, listMessages } from '@/lib/messages-store'
+import { auth } from '@/auth'
+import { clearConversation, listMessages } from '@/lib/db/messages'
 
 export const runtime = 'nodejs'
 
 export async function GET(req: NextRequest) {
+  const session = await auth()
+  if (!session?.user?.id) {
+    return NextResponse.json(
+      { error: '请先登录', code: 'UNAUTHENTICATED' },
+      { status: 401 },
+    )
+  }
+
   const datasetId = req.nextUrl.searchParams.get('datasetId')
   if (!datasetId) {
     return NextResponse.json(
@@ -23,18 +32,27 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const messages = await listMessages(datasetId)
+    const messages = await listMessages(datasetId, session.user.id)
     return NextResponse.json(messages)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
+    const status = msg.includes('无权访问') ? 404 : 500
     return NextResponse.json(
       { error: msg, code: 'LIST_MESSAGES_FAILED' },
-      { status: 500 },
+      { status },
     )
   }
 }
 
 export async function DELETE(req: NextRequest) {
+  const session = await auth()
+  if (!session?.user?.id) {
+    return NextResponse.json(
+      { error: '请先登录', code: 'UNAUTHENTICATED' },
+      { status: 401 },
+    )
+  }
+
   const datasetId = req.nextUrl.searchParams.get('datasetId')
   if (!datasetId) {
     return NextResponse.json(
@@ -44,13 +62,14 @@ export async function DELETE(req: NextRequest) {
   }
 
   try {
-    await clearConversation(datasetId)
+    await clearConversation(datasetId, session.user.id)
     return NextResponse.json({ ok: true })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
+    const status = msg.includes('无权访问') ? 404 : 500
     return NextResponse.json(
       { error: msg, code: 'CLEAR_FAILED' },
-      { status: 500 },
+      { status },
     )
   }
 }

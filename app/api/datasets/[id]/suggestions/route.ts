@@ -10,7 +10,8 @@
 // ============================================================
 
 import { NextResponse } from 'next/server'
-import { getDataset } from '@/lib/dataset-store'
+import { auth } from '@/auth'
+import { getDataset } from '@/lib/db/datasets'
 import { generateSuggestions } from '@/lib/suggestions'
 
 export const runtime = 'nodejs'
@@ -20,6 +21,14 @@ export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const session = await auth()
+  if (!session?.user?.id) {
+    return NextResponse.json(
+      { error: '请先登录', code: 'UNAUTHENTICATED' },
+      { status: 401 },
+    )
+  }
+
   const { id } = await params
   if (!id) {
     return NextResponse.json(
@@ -29,7 +38,7 @@ export async function GET(
   }
 
   try {
-    const ds = await getDataset(id)
+    const ds = await getDataset(id, session.user.id)
     if (!ds) {
       return NextResponse.json(
         { error: '数据集不存在', code: 'NOT_FOUND' },

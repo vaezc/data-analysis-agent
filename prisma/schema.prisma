@@ -1,0 +1,154 @@
+// ============================================================
+// Prisma schema —— Data Analysis Agent
+//
+// 阶段：S6 第二次 migration（add User + Dataset.userId 外键）。
+//
+// 演进历史（git 里的 migrations/ 文件夹）：
+//   1. 20260519145908_init                 —— 仅 Dataset + Message（无鉴权）
+//   2. 20260520_add_user_and_owner         —— 加 User 模型 + Dataset.userId 外键
+//   3. 20260520_add_login_attempts         —— 加 LoginAttempt 表（rate limit 用）
+//   4. 20260520_add_email_verification     —— User.emailVerified + EmailVerificationToken 表
+//   5. 20260520_add_oauth_accounts         —— User.password 可空 + image + Account 表（OAuth）
+//
+// 关键设计：
+//   - 表名 snake_case（@@map），字段在代码里仍是 camelCase
+//   - columns / rows / ui / llm 用 Json：保持现有数据形态
+//   - onDelete: Cascade —— 删 dataset 自动删它的 messages
+//   - 删 User → 级联删该用户所有 dataset（→ 进而级联删 messages）
+//   - @@index([datasetId, createdAt]) —— 消息按时间排序查询的主路径
+//   - @@index([userId, createdAt]) —— 列侧边栏的主查询路径
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // Supavisor pooler（6543）—— 应用运行时
+  directUrl = env("DIRECT_URL") // 直连（5432）—— 仅 migration 用
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  /// bcrypt hash（cost=12）。OAuth 用户为 null —— 没设过密码不能用 Credentials 登录
+  password      String?
+  name          String?
+  /// 头像 URL —— OAuth 用户由 provider 填，Credentials 用户暂未支持上传
+  image         String?
+  /// 邮箱验证完成时间。null = 未验证（Credentials 登录会被 authorize() 拦）。
+  /// OAuth 登录时 PrismaAdapter 自动填这个字段（OAuth provider 已验证邮箱）
+  emailVerified DateTime? @map("email_verified")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  accounts           Account[]
+  datasets           Dataset[]
+  verificationTokens EmailVerificationToken[]
+
+  @@map("users")
+}
+
+/// OAuth 账号链接表（next-auth 标准 schema）。
+///
+/// 每条记录 = "这个 User 在这个 provider 有一个对应账号"。
+/// 同一 User 可以有多个 Account（同时绑 Google + GitHub）。
+///
+/// 设计要点：
+///   - PrismaAdapter 自动管理（OAuth 登录时 upsert）—— 应用代码基本不直接写这表
+///   - (provider, providerAccountId) 复合唯一：同一 Google 账号不能绑两个本应用 User
+///   - tokens（access/refresh/id_token）字段 @db.Text 支持长字符串
+///   - 删 User → 级联清这些 Account（用户注销时关掉所有 OAuth 链接）
+///
+/// 字段命名故意保留 snake_case（access_token / expires_at）—— 这是 next-auth 标准要求
+/// PrismaAdapter 直接按这些字段名 INSERT，**不可改成 camelCase**。
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id")
+  type              String // 'oauth' | 'oidc' | 'email' | 'credentials'
+  provider          String // 'google' | 'github' | ...
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+/// 邮箱验证 token。
+///
+/// 设计要点：
+///   - token 字段是发给用户的 base64url 随机串（32 字节 → 43 字符）；DB 直接存原值
+///     —— 生产应存 SHA-256 hash，防 DB 泄漏后 token 被滥用（demo 简化）
+///   - 24 小时过期；过期后用户可调 /api/auth/resend-verification 重发
+///   - 验证成功后立刻删（一次性）—— 避免相同 token 被重放
+///   - userId 外键 + onDelete: Cascade：删 user 自动清理
+///   - @@index([token]) 是查询主路径；token 本身已 @unique 实际上会建索引，显式标更清楚
+model EmailVerificationToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("email_verification_tokens")
+}
+
+model Dataset {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  name      String
+  columns   Json // [{ name: string, type: 'string'|'number'|'boolean'|'date' }, ...]
+  rows      Json // [[v1, v2, ...], ...] 二维数组
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@index([userId, createdAt])
+  @@map("datasets")
+}
+
+/// 登录失败记录（用于 rate limit）。
+///
+/// 设计要点：
+///   - 只记失败：登录成功时 clearFailedAttempts(email) 直接清掉历史，无需 success 字段
+///   - 用 email 不是 userId：不存在的邮箱也要 rate limit，防止 email enumeration 攻击
+///   - 不外键到 User：因为可能针对不存在用户暴力破解，外键反而限制了
+///   - 索引 (email, createdAt) —— 查"最近 N 分钟此 email 的失败次数"主路径
+///
+/// 清理：当前不自动清，每条记录约 100 字节，1 万条 ~1 MB。生产可加 Vercel cron 每天清 7 天前的。
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  email     String
+  ipAddress String?  @map("ip_address") // 备查；当前未基于 IP 做 limit
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([email, createdAt])
+  @@map("login_attempts")
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  datasetId String   @map("dataset_id")
+  role      String // 'user' | 'assistant'
+  ui        Json // 前端展示数据（含 steps / charts / reports / images / content）
+  llm       Json // OpenAI 协议格式（messages 序列片段，含 reasoning_content / tool_calls / tool result）
+  createdAt DateTime @default(now()) @map("created_at")
+
+  dataset Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@index([datasetId, createdAt])
+  @@map("messages")
+}

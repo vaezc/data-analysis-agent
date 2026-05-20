@@ -159,7 +159,7 @@ export function ChatPanel({ datasetId, columns }: ChatPanelProps) {
   const handleDeleteMessage = async (messageId: string) => {
     if (
       !confirm(
-        '确定删除这条对话？\n配对的 user/assistant 消息会一起删除，不可恢复。',
+        "确定删除这条对话？\n配对的 user/assistant 消息会一起删除，不可恢复。",
       )
     )
       return;
@@ -170,7 +170,7 @@ export function ChatPanel({ datasetId, columns }: ChatPanelProps) {
   const handleNewChat = async () => {
     if (
       !confirm(
-        '确定开始新对话？\n当前对话历史会被清空（数据集保留），且不可恢复。',
+        "确定开始新对话？\n当前对话历史会被清空（数据集保留），且不可恢复。",
       )
     )
       return;

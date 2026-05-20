@@ -11,7 +11,7 @@
 // ============================================================
 
 import { chatCompletion } from '@/lib/llm'
-import { getDataset, getDatasetSummary } from '@/lib/dataset-store'
+import { getDataset, getDatasetSummary } from '@/lib/db/datasets'
 import { runSQLOnDataset } from '@/lib/tools/sqlite-runner'
 import type {
   AnalysisResult,
@@ -29,6 +29,8 @@ import type {
 export interface ToolExecutionContext {
   /** 工具执行中需要推给前端的业务事件（chart / report）。tool_start/tool_done 由 agent 推。 */
   emit: (event: StreamEvent) => void
+  /** 当前登录用户 ID —— inspect_data / run_analysis 查数据集时做 owner check 用。 */
+  userId: string
 }
 
 // ============================================================
@@ -43,9 +45,9 @@ export async function executeTool(
   try {
     switch (toolName) {
       case 'inspect_data':
-        return JSON.stringify(await execInspect(args))
+        return JSON.stringify(await execInspect(args, ctx))
       case 'run_analysis':
-        return JSON.stringify(await execAnalysis(args))
+        return JSON.stringify(await execAnalysis(args, ctx))
       case 'create_chart':
         return JSON.stringify(execChart(args, ctx))
       case 'generate_report':
@@ -80,10 +82,10 @@ function asString(args: Record<string, unknown>, key: string): string {
 // inspect_data
 // ============================================================
 
-async function execInspect(rawArgs: unknown) {
+async function execInspect(rawArgs: unknown, ctx: ToolExecutionContext) {
   const args = asObject(rawArgs)
   const id = asString(args, 'dataset_id')
-  const summary = await getDatasetSummary(id)
+  const summary = await getDatasetSummary(id, ctx.userId)
   if (!summary) throw new Error(`数据集不存在：${id}`)
   return summary
 }
@@ -117,13 +119,16 @@ FROM data
 GROUP BY "region"
 ORDER BY total DESC`
 
-async function execAnalysis(rawArgs: unknown): Promise<AnalysisResult> {
+async function execAnalysis(
+  rawArgs: unknown,
+  ctx: ToolExecutionContext,
+): Promise<AnalysisResult> {
   const args = asObject(rawArgs)
   const datasetId = asString(args, 'dataset_id')
   const intent = asString(args, 'intent')
   const description = asString(args, 'description')
 
-  const ds = await getDataset(datasetId)
+  const ds = await getDataset(datasetId, ctx.userId)
   if (!ds) throw new Error(`数据集不存在：${datasetId}`)
 
   const sql = await generateAnalysisSQL(ds.columns, ds.rows.slice(0, 2), intent)
@@ -197,6 +202,7 @@ async function generateAnalysisSQL(
       { role: 'user', content: userMsg },
     ],
     temperature: 0.2,
+    debugTag: 'sql-gen (2nd LLM)',
   })
 
   let sql = completion.choices[0]?.message?.content?.trim() ?? ''

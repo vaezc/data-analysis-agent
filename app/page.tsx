@@ -4,6 +4,7 @@ import { BarChart3, Loader2, Trash2, Users } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { ThemeToggle } from '@/components/ui/ThemeToggle'
+import { UserMenu } from '@/components/auth/UserMenu'
 import {
   FileUploader,
   type UploadedDataset,
@@ -240,8 +241,13 @@ export default function Home() {
           )}
         </div>
 
-        <div className="border-t border-border px-3 py-2">
-          <ThemeToggle />
+        <div className="border-t border-border">
+          <div className="px-3 py-1.5 border-b border-border/60">
+            <UserMenu />
+          </div>
+          <div className="px-3 py-2">
+            <ThemeToggle />
+          </div>
         </div>
       </aside>
 

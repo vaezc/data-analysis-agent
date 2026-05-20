@@ -6,7 +6,8 @@
 // ============================================================
 
 import { NextResponse } from 'next/server'
-import { deleteDataset } from '@/lib/dataset-store'
+import { auth } from '@/auth'
+import { deleteDataset } from '@/lib/db/datasets'
 
 export const runtime = 'nodejs'
 
@@ -14,6 +15,14 @@ export async function DELETE(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const session = await auth()
+  if (!session?.user?.id) {
+    return NextResponse.json(
+      { error: '请先登录', code: 'UNAUTHENTICATED' },
+      { status: 401 },
+    )
+  }
+
   const { id } = await params
   if (!id) {
     return NextResponse.json(
@@ -23,7 +32,14 @@ export async function DELETE(
   }
 
   try {
-    await deleteDataset(id)
+    const { count } = await deleteDataset(id, session.user.id)
+    // count=0 表示数据集不存在 OR 不属于该 user —— 故意不区分（防越权探测）
+    if (count === 0) {
+      return NextResponse.json(
+        { error: '数据集不存在', code: 'NOT_FOUND' },
+        { status: 404 },
+      )
+    }
     return NextResponse.json({ ok: true })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)

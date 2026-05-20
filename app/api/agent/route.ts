@@ -20,13 +20,14 @@
 // ============================================================
 
 import { type NextRequest, NextResponse } from 'next/server'
+import { auth } from '@/auth'
 import { runAgent } from '@/lib/agent'
 import type { ChatCompletionMessageParam } from '@/lib/llm'
 import {
   loadConversation,
   saveAssistantMessage,
   saveUserMessage,
-} from '@/lib/messages-store'
+} from '@/lib/db/messages'
 import type { AgentStep, ChatMessage, StreamEvent } from '@/types'
 
 export const runtime = 'nodejs'
@@ -36,6 +37,16 @@ export const runtime = 'nodejs'
 export const maxDuration = 60
 
 export async function POST(req: NextRequest) {
+  // ---------- 0. 鉴权 ----------
+  const session = await auth()
+  if (!session?.user?.id) {
+    return NextResponse.json(
+      { error: '请先登录', code: 'UNAUTHENTICATED' },
+      { status: 401 },
+    )
+  }
+  const userId = session.user.id
+
   // ---------- 1. 解析 & 校验请求体 ----------
   let body: unknown
   try {
@@ -87,21 +98,23 @@ export async function POST(req: NextRequest) {
     userImages = rawImages
   }
 
-  // ---------- 2. 加载历史 + 入库用户消息 ----------
+  // ---------- 2. 加载历史 + 入库用户消息（含 owner check） ----------
   let previousMessages: ChatCompletionMessageParam[] = []
   try {
-    const conv = await loadConversation(datasetId)
+    const conv = await loadConversation(datasetId, userId)
     previousMessages = conv.llmMessages
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
+    // owner check 失败时数据层抛"数据集不存在或无权访问"——映射为 404
+    const status = msg.includes('无权访问') || msg.includes('不存在') ? 404 : 500
     return NextResponse.json(
       { error: `加载历史失败：${msg}`, code: 'LOAD_HISTORY_FAILED' },
-      { status: 500 },
+      { status },
     )
   }
 
   try {
-    await saveUserMessage(datasetId, userText, userImages)
+    await saveUserMessage(datasetId, userId, userText, userImages)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return NextResponse.json(
@@ -150,6 +163,7 @@ export async function POST(req: NextRequest) {
       try {
         await runAgent({
           datasetId,
+          userId,
           userMessage: userText,
           userImages,
           previousMessages,
@@ -169,7 +183,12 @@ export async function POST(req: NextRequest) {
           assistant.reports.length > 0
         ) {
           try {
-            await saveAssistantMessage(datasetId, assistant, newLlmMessages)
+            await saveAssistantMessage(
+              datasetId,
+              userId,
+              assistant,
+              newLlmMessages,
+            )
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
             emit({ type: 'error', message: `保存对话失败：${msg}` })

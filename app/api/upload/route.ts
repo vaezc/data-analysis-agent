@@ -8,7 +8,8 @@
 // ============================================================
 
 import { NextResponse, type NextRequest } from 'next/server'
-import { createDataset } from '@/lib/dataset-store'
+import { auth } from '@/auth'
+import { createDataset } from '@/lib/db/datasets'
 
 // 显式声明 Node runtime：papaparse / xlsx / Buffer 都要 Node API，Edge 不行
 export const runtime = 'nodejs'
@@ -20,6 +21,12 @@ const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
 const ALLOWED_EXTS = new Set(['csv', 'xlsx'])
 
 export async function POST(req: NextRequest) {
+  // 鉴权（S6 起 dataset 必须归属用户；S8 会把这套放到其他 4 个路由）
+  const session = await auth()
+  if (!session?.user?.id) {
+    return errorResponse('请先登录', 'UNAUTHENTICATED', 401)
+  }
+
   try {
     const formData = await req.formData()
     const file = formData.get('file')
@@ -50,7 +57,7 @@ export async function POST(req: NextRequest) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer())
-    const dataset = await createDataset(file.name, buffer)
+    const dataset = await createDataset(session.user.id, file.name, buffer)
 
     return NextResponse.json({
       id: dataset.id,

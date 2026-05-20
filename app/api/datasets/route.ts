@@ -5,13 +5,22 @@
 // ============================================================
 
 import { NextResponse } from 'next/server'
-import { listDatasets } from '@/lib/dataset-store'
+import { auth } from '@/auth'
+import { listDatasets } from '@/lib/db/datasets'
 
 export const runtime = 'nodejs'
 
 export async function GET() {
+  const session = await auth()
+  if (!session?.user?.id) {
+    return NextResponse.json(
+      { error: '请先登录', code: 'UNAUTHENTICATED' },
+      { status: 401 },
+    )
+  }
+
   try {
-    const list = await listDatasets()
+    const list = await listDatasets(session.user.id)
     return NextResponse.json(list)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
