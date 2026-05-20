@@ -131,7 +131,7 @@ flowchart LR
 **准备：数据集已上传到内存**
 
 ```ts
-// lib/dataset-store.ts 的内存存储
+// lib/db/datasets.ts 读出的数据集结构
 {
   id: 'ds_abc123',
   name: 'sales.csv',
@@ -688,7 +688,7 @@ const client = new OpenAI({ apiKey, baseURL: PROVIDERS[provider].baseURL })
 
 ### 3.5 多轮对话持久化：从前端 history 到 Supabase（演进故事）
 
-**位置**：`lib/messages-store.ts`、`app/api/agent/route.ts`、`hooks/use-agent.ts`
+**位置**：`lib/db/messages.ts`（曾名 `lib/messages-store.ts`，Phase 4 迁 Prisma）、`app/api/agent/route.ts`、`hooks/use-agent.ts`
 
 **关键决策**：后端读 / 写 DB 是 source of truth，前端只维护 UI 状态。
 
@@ -1114,6 +1114,116 @@ const suggestions = llmSuggestions ?? templateSuggestions  // 模板 fallback
 - 工程决策不是"哪个技术先进选哪个"，是"对用户最有用的选哪个"。
 - 体积、依赖复杂度、平台兼容性都是真实约束。
 
+### 4.7 数据访问层从 supabase-js 迁到 Prisma
+
+**动机**：项目要加用户鉴权，但 Auth.js 主流生态是 Prisma + Postgres。当时项目用 `@supabase/supabase-js` 直查 Postgres——技术上能继续用，但**双栈共存（"User 表用 Prisma，旧表继续 SDK"）会让任何 reviewer 都问"为啥不统一"**。所以决定**全栈迁移**。
+
+**迁移路径**（两次 schema migration，都进 git）：
+
+```
+S2: init                  Dataset + Message（无 user 关系，仅做数据层切换）
+S6: add_user_and_owner    + User 表 + Dataset.userId FK + ON DELETE CASCADE
+```
+
+**取舍 1：保留 Supabase 还是换 Neon / RDS？**
+
+Supabase 在我们项目里只是"一个有 UI 的 Postgres 托管"——没用 Auth、Realtime、Storage、RLS。所以**保留 Supabase 作为 Postgres 宿主，但抛弃 SDK**。换的成本（迁数据 / 改连接字符串）≫ 留下来的收益。
+
+**取舍 2：Prisma vs Drizzle？**
+
+2026 年招聘市场看 Prisma 提及率 ~60% / Drizzle ~20%。Drizzle 上升趋势明显（Vercel 主推）但 Prisma 是"安全牌"——讲了不会扣分，不讲反而被问。**选 Prisma 是低风险选择，未来项目可以试 Drizzle**。
+
+**关键性能优化：`jsonb_array_length` O(1) 算 rowCount**
+
+旧版有 `row_count` 列（denormalization）。Prisma schema 里我**没加**这列，因为：
+
+- Postgres 的 `jsonb_array_length(rows)` 是 **O(1)** ——JSONB header 里存了元素数，不需要扫数组
+- 不需要额外 denormalization 字段
+- 不需要应用层维护 row_count（每次 INSERT/DELETE rows 都要同步更新）
+
+```ts
+// lib/db/datasets.ts:listDatasets
+const rows = await prisma.$queryRaw<...>`
+  SELECT id, name, columns,
+    jsonb_array_length(rows) AS row_count,
+    created_at
+  FROM datasets
+  ORDER BY created_at DESC
+`
+```
+
+**面试讲点**：
+
+- 重构是展示**判断力**，新写是展示**执行力**——前者在面试里更有分量
+- 不要为了"统一"硬上 ORM。这里之所以能干净迁移，是因为我们只用了 Supabase 的 Postgres 部分。如果还用了 Realtime / Storage，迁移代价会大很多
+- denormalization 不是反范式的"邪门歪道"，**但应该在性能确实有问题时再上**。我先用 jsonb 原生函数搞定，等真有压力再考虑 row_count 列
+
+### 4.8 Auth.js v5 双文件架构（避免 Edge runtime 污染）
+
+**问题**：Next.js 16 的 `proxy.ts`（旧名 `middleware.ts`）会被打包成 edge-compatible 代码。如果 proxy 直接 import `auth.ts` 里的完整配置——里面有 Prisma client（含 schema engine binary）+ bcrypt（native binding）——edge runtime 会立刻报错或 binary 加载失败。
+
+**Auth.js v5 标准模式**：
+
+```
+auth.config.ts   ← edge-safe，仅类型 + callbacks，不 import Prisma / bcrypt
+       ↓
+auth.ts          ← 完整配置，extends authConfig，加 Credentials provider + Prisma
+       ↓
+proxy.ts         ← 仅 import authConfig，永远不 import auth.ts
+```
+
+`proxy.ts` 拿到的是"配置壳子"，runtime 只跑 `authorized` callback 判断要不要拦截。所有需要 DB 的操作（authorize / signIn）都在 Node runtime 走 auth.ts。
+
+**JWT callback 必须显式注入 user.id**：
+
+```ts
+// auth.config.ts
+callbacks: {
+  jwt({ token, user }) {
+    if (user) token.id = user.id    // 登录时 user 有值，写进 token
+    return token
+  },
+  session({ session, token }) {
+    if (token.id && session.user) {
+      session.user.id = token.id as string  // 暴露给业务代码
+    }
+    return session
+  },
+}
+```
+
+**默认 next-auth session 里没有 `id` 字段**，必须手动写。`session.user.id` 是后续所有 owner check 的基础——少这一步整套鉴权就废了。
+
+**面试讲点**：
+
+- 双文件不是"为了优雅"——是 edge runtime 的物理约束
+- JWT vs DB session：JWT 无状态（每次解密拿 user.id），DB session 每次请求多一次 SELECT。**Vercel Serverless 选 JWT**——cold start 本来就慢，不要再叠 DB roundtrip
+- 不用 OAuth provider 而用 Credentials 是有意选择——展示 bcrypt + 自己写 authorize 的完整链路，比 "click sign in with Google" 信息密度高
+
+### 4.9 Next.js 16 `proxy.ts` —— 不只是改名
+
+Next.js 16 把 `middleware.ts` 改名为 `proxy.ts`，导出函数名也从 `middleware` 改成 `proxy`。Auth.js v5 官方文档里**大量示例还是旧写法**，直接抄过来就 build 不过。
+
+**正确写法**（注意 export 形式 + matcher 排除）：
+
+```ts
+// proxy.ts
+import NextAuth from 'next-auth'
+import { authConfig } from './auth.config'
+
+export default NextAuth(authConfig).auth   // ← 这是 Auth.js v5 的 chain 写法
+
+export const config = {
+  // 必须排除 /api/auth/*，否则注册 / 登录接口自己被拦
+  matcher: ['/((?!api/auth|_next/static|_next/image|favicon.ico|icon.png).*)'],
+}
+```
+
+**面试讲点**：
+
+- 新版本 release notes 一定要读到底——大改名这种事容易在踩坑时才发现
+- Matcher 排除 `/api/auth/*` 是经典死循环陷阱
+
 ---
 
 ## 5. 踩坑实录
@@ -1253,6 +1363,132 @@ LLM 看到反例后会主动避开。
 - "本地能跑 ≠ 生产能跑"——Serverless 平台的 invocation model 必须早期理解
 - 内存状态只对"单实例 + 长生命周期"有效——Vercel/Lambda 都不满足
 - 持久化层不是"未来再考虑"的事，是 Serverless 的入门要求
+
+### 5.11 Prisma CLI 只读 `.env`，不读 `.env.local`
+
+**症状**：`.env.local` 里写了 `DATABASE_URL` 和 `DIRECT_URL`，但 `npx prisma validate` 报：
+
+```
+Error: P1012: Environment variable not found: DIRECT_URL.
+```
+
+**根因**：Prisma CLI 只读 `.env`，不会读 Next.js 那一套 `.env.local` / `.env.development.local` / etc.。
+
+**解决**：DB 连接字符串单独放 `.env`（这文件也 gitignored），其他敏感 secret 留 `.env.local`：
+
+| 文件 | 谁读 | 放什么 |
+|---|---|---|
+| `.env` | Prisma CLI + Next.js | `DATABASE_URL` `DIRECT_URL` |
+| `.env.local` | Next.js only | LLM key、AUTH_SECRET 等应用 secret |
+
+**面试讲点**：
+
+- 每个工具的 env 加载约定可能不同。Prisma / Vite / esbuild / Jest 各家都有自己的规则
+- 遇到"我明明配了！"的玄学错误，先确认这个工具读哪个文件——不要立刻怀疑代码
+
+### 5.12 Supabase 密码含 `@` `]` 未 URL 编码
+
+**症状**：复制 Supabase Dashboard 给的连接字符串、填到 `.env`，Prisma 报 "Can't reach database server"。但密码是对的，端口也是对的。
+
+**根因**：Postgres 连接 URI 形如 `postgresql://USER:PASSWORD@HOST:PORT/DB`，**第一个 `@` 是分隔符**。Supabase 自动生成的密码经常含 `@` `]` `[` 这种 URI 保留字符，**裸着写就被解析器误当分隔符**：
+
+```
+postgresql://user:abc@7502254]@aws-1.pooler.supabase.com:6543/postgres
+                  ^^^^      ^   ^
+                  密码    被截    误以为是主机名 "7502254]@aws-1..."
+```
+
+**解决**：URL 编码：
+
+| 字符 | 编码 |
+|---|---|
+| `@` | `%40` |
+| `[` `]` | `%5B` `%5D` |
+| `#` | `%23` |
+| `&` | `%26` |
+| `?` | `%3F` |
+| `:` | `%3A` |
+| `+` | `%2B` |
+
+一行命令搞定：
+
+```bash
+node -e 'console.log(encodeURIComponent("YOUR_PASSWORD"))'
+```
+
+**面试讲点**：
+
+- URI 字符规则在所有 connection string / OAuth callback / API key 场景通用
+- 排查 "Can't reach database" 这种笼统错误时，**先验证 URL 本身能不能被正确解析**——常见误判方向是"网络问题"、"防火墙"
+
+### 5.13 Turbopack 打包 Prisma 时 schema engine 路径丢失
+
+**症状**：直接用 `node -e` 测试 PrismaClient 能连上 DB，但 `npm run dev` 跑 Next.js 时调 Prisma 报：
+
+```
+Can't reach database server at `aws-1...pooler.supabase.com:6543`
+```
+
+诡异——同样的连接字符串，环境不一样结果也不一样。
+
+**根因**：Next.js 16 默认用 Turbopack。Turbopack 把 `@prisma/client` 内联打包后，**schema engine binary 找不到正确路径**——它要去 `node_modules/@prisma/engines/` 加载 native 引擎，被打包后路径被改了。
+
+**解决**：和 `better-sqlite3` 同类问题，标 external：
+
+```ts
+// next.config.ts
+const nextConfig: NextConfig = {
+  serverExternalPackages: [
+    'better-sqlite3',
+    '@prisma/client',
+    '@prisma/engines',
+  ],
+}
+```
+
+让运行时 `require()` 走 node_modules 真实路径，绕过打包工具。
+
+**面试讲点**：
+
+- **凡是含 native binding / 二进制文件的 npm 包，永远要标 external**——`better-sqlite3` `@prisma/engines` `sharp` `canvas` `bcrypt`（注意我们用 `bcryptjs` 是纯 JS 实现，没这个问题）等都是
+- "本地直连 Node 测能跑 / Next dev 跑不动" 这种症状，几乎都是打包工具的问题，不是数据库 / 网络的问题
+
+### 5.14 Supavisor pooler（6543）vs 直连（5432）
+
+**位置**：`.env` 的 `DATABASE_URL` 和 `DIRECT_URL`
+
+Supabase 给两种连接端口：
+
+| 端口 | 用途 | 何时用 |
+|---|---|---|
+| **6543** | Supavisor pooler | 应用代码（每次请求拿一个连接，用完归还，复用） |
+| **5432** | 直连 | Prisma migration（pooler 不支持 prepared statements 之类的 DDL 流量） |
+
+**为什么必须 pooler？**
+
+Supabase 免费版每个项目限 **~60 个并发 Postgres 连接**。Vercel Serverless 每个 lambda 实例独立开连接：
+
+```
+冷启动 5 个 lambda × 每个 Prisma 默认开 5-10 连接 = 50 个
+预热再来 2 个 = 70 个 → 爆了
+```
+
+走 pooler 后所有 lambda 共用 ~60 连接池子，pgbouncer 在中间做复用。
+
+**Prisma 必须告诉它走的是 pgbouncer**：
+
+```
+DATABASE_URL="postgresql://...:6543/postgres?pgbouncer=true&connection_limit=1"
+```
+
+- `pgbouncer=true` —— 告诉 Prisma 不要发 prepared statements（pooler 不支持）
+- `connection_limit=1` —— 每个 lambda 实例只开 1 个连接，配合 pooler 才合理
+
+**面试讲点**：
+
+- Serverless + Postgres 的连接池问题是真实生产坑。**没踩过的人讲不出来这个细节**
+- pooler 不是"加速"——是为了不让 60 个连接被一波冷启动打爆
+- migrations 走直连，因为它要做 schema 操作，pooler 中转会卡
 
 ---
 
@@ -1454,6 +1690,111 @@ LLM 看到反例后会主动避开。
 
 > 详见 3.8。一句话：当前规模不需要——状态要么完全局部、要么被 hook 封装得很干净，没有 prop drilling 痛点。引入它的信号（cross-tree 共享、组件外访问、middleware 需求）当前都没出现，提前引入是 over-engineering。等加用户系统或设置面板时再上。
 
+### 6.7 鉴权与数据层类（Phase 4 新增）
+
+**Q：为什么从 supabase-js 迁到 Prisma？这个迁移成本不小，值得吗？**
+
+> 详见 4.7。简版：要加用户鉴权，Auth.js 主流生态是 Prisma + Postgres。如果保留 supabase-js 同时新增 Prisma，项目里**两套 DB client 访问同一个库**——任何 reviewer 都会问"为啥不统一"。所以决定全栈迁移。
+>
+> 我们项目里 Supabase 只用了 Postgres，没用 Auth / Realtime / Storage / RLS——所以**保留 Supabase 作为宿主、抛弃 SDK** 的代价很低。如果还重度用了别的产品，迁移成本会大很多。
+>
+> 这个故事的核心是**判断力**而不是**执行力**。会重构远比会新写值钱。
+
+**Q：JWT session 还是 DB session？为什么？**
+
+> JWT，理由是 Vercel Serverless。
+>
+> DB session 每次请求多一次 SELECT 验 token 有效性，cold start 本来就慢，不想再叠 DB roundtrip。JWT 无状态、用 AUTH_SECRET 签名，每个 lambda 单独解密即可。
+>
+> 代价：登出做不到"立刻吊销所有 session"——只能等 token 自然过期（30 天）。我们这种场景没有"被盗号要紧急吊销"的需求，可以接受。真生产要做吊销，再加一个 Redis 黑名单。
+
+**Q：为什么用 Credentials（邮箱密码）而不是 OAuth？**
+
+> 三个理由：
+>
+> 1. **面试讲点更密集**——bcrypt cost / salt 内置、邮箱归一化、邮箱重复 409 全是细节。"点 Sign in with Google"信息密度比这个低
+> 2. **不依赖外部服务**——Auth0 / Clerk 都要配 webhook、redirect URI、scope，调试链路长
+> 3. **真实业务场景**——很多 B 端项目用户压根没 Google 账号，必须本地邮箱
+>
+> Production 推荐 Credentials + OAuth 都接，让用户选。但作品集项目展示单条路径已经够。
+
+**Q：bcrypt cost factor 为什么选 12？怎么选这个数？**
+
+> cost=12 → 单次 hash ~250ms（M1 / 2023+ 服务器），对应 2^12 次轮迭代。
+>
+> 选择依据：
+>
+> - **太低（<10）**：彩虹表 + 字典攻击成本可承受
+> - **12 是当前业界推荐底线**（OWASP / NIST 都引这个数）
+> - **太高（>14）**：单次 hash >1s，登录体验差 + DDoS 风险（攻击者发大量错密码请求拖垮服务器）
+>
+> 每过几年硬件变快，推荐 cost 也要升——这是为什么 bcrypt hash 里**显式存了 cost**（`$2b$12$...`），可以平滑升级：用户下次登录时验证用旧 cost，验证成功后用新 cost 重新 hash 存库。
+
+**Q：你这套鉴权能防 CSRF / XSS / Session Fixation 吗？**
+
+> 默认开启的防护：
+>
+> - **CSRF**：Auth.js 自带 csrf token + SameSite=lax cookie，登录 form 必须带 csrfToken 字段
+> - **XSS**：session cookie 是 HttpOnly + Secure（prod），JS 拿不到。但**前端如果直接渲染用户输入而不 escape，XSS 还是可能**——我们用 React/JSX 默认 escape，加上 Markdown 用 react-markdown（GFM 不允许 raw HTML），覆盖了主要场景
+> - **Session Fixation**：JWT 每次 sign in 都是全新 token，无法预测
+>
+> 没做的：
+>
+> - 登录失败 rate limit（防暴力破解）—— 可以加 Vercel KV 计数器
+> - 邮箱验证（注册时发邮件确认）—— Phase 5 再加
+> - MFA / TOTP —— 同上
+
+**Q：Dataset.userId NOT NULL 这种 schema 设计，万一有 migration 时旧数据怎么办？**
+
+> 我们这次很巧——加 user_id 列的时候 datasets 表是空的（清库重做），所以直接 NOT NULL 不报错。
+>
+> 真生产场景的标准做法是 **3 步走**：
+>
+> 1. ALTER TABLE ADD COLUMN user_id（**nullable**）
+> 2. 应用层先把所有读写都带上 user_id，新数据写新列
+> 3. backfill 旧数据（用 default user / SQL update from join）
+> 4. 最后 ALTER TABLE 改 NOT NULL
+>
+> 中间任何一步都不停机。Prisma `migrate dev` 不擅长这套，得手写 SQL migration 或者用 `prisma migrate diff`。
+
+**Q：`proxy.ts` 是什么？跟旧的 `middleware.ts` 什么区别？**
+
+> Next.js 16 把 `middleware.ts` 改名为 `proxy.ts`，导出函数名 `middleware` 也改成 `proxy`。**功能完全一样**——请求路径上的拦截器、可以重写 / 重定向 / 加 header。
+>
+> 改名的官方理由是"middleware"这个词在分布式系统里有特定含义（消息中间件），Next.js 这个东西其实是反向代理层的钩子，叫 proxy 更准确。
+>
+> 真正的坑：Auth.js v5 文档大量示例还是 `middleware.ts` 写法，**直接抄过来 Next 16 编译不过**。
+
+**Q：Prisma 怎么处理 JSONB 字段类型？rows 是 `Json` 类型，TS 端怎么用？**
+
+> Prisma 把 `Json` 类型暴露成 `Prisma.JsonValue`（约等于 `unknown`）。读出来要 cast 回业务类型：
+>
+> ```ts
+> const row = await prisma.dataset.findUnique({ where: { id } })
+> const columns = row.columns as unknown as Column[]  // 类型断言
+> const rows = row.rows as unknown as Row[]
+> ```
+>
+> 这个 `as unknown as` 双断言不优雅，但 Prisma 不可能从 JSONB 自动推断业务类型——schema 里就只写了 "Json"。
+>
+> 真要类型安全：上 Zod 在读取后 parse。我们 demo 阶段省了这步，因为写入端也是我们自己控制的，结构稳定。
+
+**Q：listDatasets 为什么用 `$queryRaw` 而不是 Prisma 的 findMany？**
+
+> 因为要用 Postgres 原生函数 `jsonb_array_length(rows)` 算行数——**O(1)** 操作（JSONB header 里直接读元素数，不扫数组）。
+>
+> Prisma 的 ORM API 没法在 SELECT 子句里调 Postgres 函数。能调的只有 WHERE 子句的 Json path filter。
+>
+> 三种取舍：
+>
+> | 方案 | 性能 | 干净度 |
+> |---|---|---|
+> | denormalized `row_count` 列 | O(1) | 多一列 + 写入时要同步 |
+> | findMany 后内存数 length | O(n) load 全量 rows | 干净但**侧边栏可能拉几十 MB** |
+> | `$queryRaw` + `jsonb_array_length` | O(1) | 一段裸 SQL |
+>
+> 选第三个——Prisma 是 ORM 但不强迫"只用它"，混用 raw 在性能关键路径是合理的。
+
 ---
 
 ## 7. 演进路径
@@ -1498,9 +1839,16 @@ LLM 看到反例后会主动避开。
 | `lib/tools/sqlite-runner.ts` | better-sqlite3 SQL 沙箱（替代 vm） | 改 SQL 校验 / 性能 |
 | `lib/tools/definitions.ts` | 工具 schema (给 LLM 看) | 模型不调工具 / 调错工具 |
 | `lib/llm.ts` | provider 抽象 + stream 接口 + 详细错误诊断 | 切换 provider / 加新模型 |
-| `lib/supabase.ts` | Supabase server client 单例 | service_role 配置 / RLS |
-| `lib/dataset-store.ts` | 数据集 CRUD（Supabase 后端） + CSV/Excel 解析 + 类型推断 | 上传问题 / 列类型错误 |
-| `lib/messages-store.ts` | 对话消息持久化 + 滑动窗口（loadConversation 最近 40 条） | 历史不全 / 切换 dataset 丢消息 |
+| `lib/prisma.ts` | Prisma client 单例（HMR-safe） | 数据访问入口 / 改连接策略 |
+| `lib/db/datasets.ts` | 数据集 CRUD（Prisma）+ CSV/Excel 解析 + jsonb_array_length O(1) rowCount | 上传问题 / 列类型错误 / 列表性能 |
+| `lib/db/messages.ts` | 对话消息持久化（Prisma）+ 滑动窗口 + 配对删除（$queryRaw JSONB 路径查询） | 历史不全 / 切换 dataset 丢消息 / 删除逻辑 |
+| `auth.config.ts` | Auth.js Edge-safe 部分（callbacks + authorized 路由保护） | 改路由保护规则 / 调 JWT 字段 |
+| `auth.ts` | Auth.js 完整配置（Credentials + Prisma + bcrypt） | 加 OAuth provider / 改 authorize |
+| `proxy.ts` | Next.js 16 路由保护入口（旧 middleware.ts） | 加 matcher 规则 / 拦截行为 |
+| `app/api/auth/[...nextauth]/route.ts` | next-auth 内置接口（signin / signout / session / csrf） | 不改 |
+| `app/api/auth/register/route.ts` | 邮箱注册（bcrypt cost=12 + 邮箱归一化 + 重复 409） | 改注册校验 / 加邮箱验证 |
+| `prisma/schema.prisma` | DB schema（User / Dataset / Message + 索引 + 级联） | 加表 / 加字段 / 改 onDelete |
+| `prisma/migrations/` | git 跟踪的 SQL migration 历史 | review schema 演进 |
 | `lib/suggestions.ts` | LLM 生成自然中文提问建议 | 建议生硬 / 改 prompt |
 | `hooks/use-agent.ts` | SSE 消费 + 历史加载 + isLoadingHistory + LLM suggestions 缓存 | 前端流式问题 / 切换 dataset |
 | `components/chat/ChatPanel.tsx` | 输入框 + sticky 滚动 + EmptyState 动态 suggestions | 滚动不跟 / 输入体验 |

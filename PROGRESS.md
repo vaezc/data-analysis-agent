@@ -31,6 +31,16 @@
 - Vercel 部署
 - 2~3 个 Demo 数据集
 
+### Phase 4（Week 4）— 用户鉴权 + Prisma 迁移
+
+**目标**：从 `@supabase/supabase-js` 迁到 Prisma 统一数据层，加邮箱密码登录，为后续多租户做基础。
+
+- 数据访问层 Supabase SDK → Prisma 全栈迁移（两次 migration 进 git）
+- Auth.js v5（Credentials + JWT + bcrypt(12)）
+- `proxy.ts` 路由保护（Next.js 16 改名）
+- 注册接口 / 登录页 / Header 退出按钮
+- 5 个分析路由加 `auth()` + owner check
+
 ---
 
 ## 2. 当前进度（Phase 1）
@@ -259,3 +269,106 @@
 5. **DuckDB**：比 SQLite 更强的 OLAP 能力（但包体积爆 Vercel hobby 50MB 限制）
 
 底线：**项目已完整可用**，所有"必做"和"应该做"都已落地。
+
+---
+
+## 6. Phase 4 进度（2026-05-19 ~ 2026-05-20）
+
+### 6.1 Prisma 全栈迁移（S1–S5）✅
+
+- **动机**：方案 C —— 抛弃 `supabase-js`，全部切 Prisma，统一数据层。Supabase 保留为 Postgres 宿主。面试讲法更完整（一次真实的 ORM 迁移故事）。
+- **变化**：
+  - 删除 `lib/supabase.ts`、`lib/dataset-store.ts`、`lib/messages-store.ts`
+  - 新增 `lib/prisma.ts`（HMR-safe 单例）
+  - 新增 `lib/db/datasets.ts`、`lib/db/messages.ts`（接口与旧版兼容，零业务代码改动）
+  - `prisma/schema.prisma` 定义 Dataset + Message + User + relations
+  - 第一次 migration `init`（仅 Dataset + Message）
+  - `next.config.ts` 加 `@prisma/client` + `@prisma/engines` 到 `serverExternalPackages`（Turbopack 必须）
+- **优化亮点**：
+  - `listDatasets` 用 **`jsonb_array_length(rows)` O(1) 算 rowCount**（基于 JSONB header），不拉全量 rows 数据
+  - `deleteMessagePair` 用 `$queryRaw` 配合 JSONB 路径操作符 `ui->>id` 查前端 UUID，标准 Prisma 配合裸 SQL 各取所长
+- **现状**：上传 / 列表 / 对话 / 配对删除 / 级联删除全跑通
+
+### 6.2 Auth.js v5 接入（S6–S7）✅
+
+- **第二次 migration `add_user_and_owner`**：加 User 表 + Dataset.userId 外键 + 索引 + 级联
+- **两文件 auth 架构**（Auth.js v5 标准）：
+  - `auth.config.ts` —— Edge-safe，给 `proxy.ts` 用，不 import Prisma / bcrypt
+  - `auth.ts` —— 完整配置，含 Credentials provider + Prisma + bcrypt
+- **Next.js 16 改名**：`middleware.ts` → `proxy.ts`，函数名 `middleware` → `proxy`
+- **JWT session 策略**：无状态，jwt callback 把 user.id 注入 token，session callback 暴露给 `session.user.id`
+- **`/api/auth/register`**：bcrypt cost=12，邮箱小写归一化，重复 409 / 弱密码 400 / 格式 400
+- **完整闭环验证**：
+  - 未登录访问 `/api/upload` → 重定向 `/login`（proxy.ts 拦截）
+  - Credentials login（cookie jar）→ 302
+  - `/api/auth/session` 返回 `{ user: { id, email } }`
+  - 登录后上传 CSV → Dataset.userId 正确归属
+
+### 6.3 多租户化 + UI（S8–S10）✅
+
+**S8 数据层 + 6 路由 owner check**：
+- 数据层全部接收 `userId` 参数 + Prisma `where: { ..., userId }` 做编译期保护
+- `deleteMessagePair` 用 SQL JOIN 一次查 owner —— 比"先查再二次验证"少一次 roundtrip
+- 6 个路由（agent / datasets / datasets/[id] / datasets/[id]/suggestions / messages / messages/[id]）全加 `auth()` 401
+- `auth.config.ts` polish：API 路径返回 401 JSON（fetch 友好），页面路径维持 302 重定向
+
+**S9 UI**：
+- `app/login/page.tsx` —— signIn('credentials', ...) + CredentialsSignin 错误中文映射
+- `app/register/page.tsx` —— 双密码校验 + 成功自动登录跳首页
+- `components/auth/UserMenu.tsx` —— 头像 + 邮箱 + 退出按钮，集成进 sidebar 底部
+- `app/providers.tsx` —— 加 SessionProvider 让 client 组件 useSession()
+
+**S10 验收（14/14 全过）**：
+未登录 / → 重定向；未登录 /api/* → 401 JSON；/login + /register 公开 200；注册返回 user.id（邮箱小写归一化）；DB 密码 bcrypt $2b$12$ / 60 字符；Credentials login 302；session 含 user.id；登录后上传成功；Dataset.userId 匹配登录用户；完整对话 → 2 条消息入库；退出后 /api/* 再次 401；A 看不到 B 的 dataset；A 越权访问 B 资源 → 404（不区分"不存在"vs"无权"）；A 越权删 B message → SQL JOIN 拦截。
+
+### 6.4 Phase 4 踩坑登记
+
+#### L12. Prisma CLI 只读 `.env`，不读 `.env.local` ✅ 已解决
+
+- **症状**：`npx prisma validate` 报 `Environment variable not found: DIRECT_URL`，但 `.env.local` 明明有
+- **根因**：Prisma CLI 不读 `.env.local`，只读 `.env`
+- **解决**：DB 连接字符串放 `.env`（这文件 gitignored）；应用 secret 放 `.env.local`。两个文件都被 Next.js 加载，但 Prisma CLI 只看 `.env`
+- **面试讲点**：每个工具的 env 加载约定可能不同，遇到"我明明配了"的玄学错误，先确认这个工具读哪个文件
+
+#### L13. Supabase 密码含 `@` `]` 等字符未 URL 编码 ✅ 已解决
+
+- **症状**：Prisma 报 "Can't reach database server"，但密码是对的
+- **根因**：Postgres 连接 URI 用 `@` 分隔用户名/密码和主机，密码里裸 `@` 会让解析器把它当分隔符
+- **解决**：URL 编码（`@` → `%40`，`]` → `%5D`）。`.env.example` 加注释提示
+- **面试讲点**：URI 字符的"保留字符"规则——`:` `@` `/` `?` `#` `[` `]` 等都要编码
+
+#### L14. Turbopack 打包 Prisma 时 schema engine 路径丢失 ✅ 已解决
+
+- **症状**：直连 Node 测试 OK，但 Next.js dev 调 Prisma 报 "Can't reach database server"
+- **根因**：Turbopack 把 `@prisma/client` 内联打包后，schema engine binary 找不到（这是 native binding 的通病，跟 `better-sqlite3` 同类）
+- **解决**：`next.config.ts` 加 `serverExternalPackages: ['better-sqlite3', '@prisma/client', '@prisma/engines']`
+- **面试讲点**：含 native binding 的包永远要标 external——`.node` 文件 / engine binary 不能被打包工具吃掉
+
+#### L15. Supavisor pooler 端口 6543 vs 直连 5432
+
+- **位置**：`.env` 的 `DATABASE_URL` vs `DIRECT_URL`
+- **设计**：应用代码走 6543（pooler，复用连接 + 适配 Serverless 冷启动）；Prisma migration 走 5432（直连，pooler 不支持 prepared statements 之类的 DDL 流量）
+- **配置加 `?pgbouncer=true&connection_limit=1`**：告诉 Prisma 走 PgBouncer + 限制每实例连接数避免打爆免费版的 ~60 个连接配额
+- **面试讲点**：Serverless + Postgres 的连接池问题——每个 lambda 实例独立开连接，必须用 pooler 中转，否则免费 plan 一冷启动一波就爆
+
+### 6.6 待选优化（Phase 5+ 候选）
+
+- **Prisma 6 → 7 升级**（独立立项，[InfoQ 报道](https://www.infoq.com/news/2026/01/prisma-7-performance/)）：
+  - v7 架构重写：Rust binary → WASM + driver adapter
+  - 包体积 14 MB → 1.6 MB（减 85%），findMany 25k 行 3.4× 加速
+  - 我们能直接获得：L14（Turbopack + Prisma binary）问题消失 + cold start 更快
+  - 强制要改：schema provider 改 `prisma-client` / package.json `"type": "module"` / 装 `@prisma/adapter-pg` / 连接池 v7 默认值重新校准
+  - 时机：等 Phase 4 完全稳定后单独立项升，不混在已完成的数据层迁移里
+- 注册时发邮件验证（防 typo / 防爬虫）
+- OAuth provider（Google / GitHub），扩展 Credentials provider
+- 登录失败 rate limit（Vercel KV 计数器，防暴力破解）
+- MFA / TOTP（敏感操作二次验证）
+
+### 6.5 文档同步状态
+
+- [x] CLAUDE.md：技术栈表 + Auth.js / Prisma 专节 + Phase 4 阶段计划
+- [x] README.md：技术栈 + Setup（DATABASE_URL/AUTH_*）+ 部署说明
+- [x] PROGRESS.md：本节
+- [x] LEARNING.md：4.X 新亮点（Prisma 迁移、Auth.js 双文件、JWT、jsonb 优化、L12-L15 踩坑）
+- [x] INTERVIEW.md：新增 STAR 故事 + Q&A + 简历文案 + 数字速查更新
+- [x] FLOW.md：§11 路径更新（lib/messages-store.ts → lib/db/messages.ts 等）

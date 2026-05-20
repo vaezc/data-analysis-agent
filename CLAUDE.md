@@ -25,11 +25,31 @@ npm run lint
 curl -F "file=@scripts/sample.csv" http://localhost:3000/api/upload
 ```
 
-环境变量配置（`.env.local`）：
+环境变量分两个文件：
+
+**`.env`**（Prisma CLI 读这个）：
+```
+DATABASE_URL="postgresql://...:6543/postgres?pgbouncer=true&connection_limit=1"
+DIRECT_URL="postgresql://...:5432/postgres"
+```
+
+**`.env.local`**（Next.js / 应用代码读这个）：
 ```
 LLM_PROVIDER=deepseek
 LLM_API_KEY=your_key_here
-LLM_MODEL=deepseek-chat
+LLM_MODEL=deepseek-v4-flash
+
+AUTH_SECRET="<openssl rand -base64 32>"
+AUTH_URL=http://localhost:3000
+```
+
+完整模板见 `.env.example`。
+
+常用 Prisma 命令：
+```bash
+npx prisma migrate dev --name <description>  # 改完 schema 后跑这个，自动生成 + 应用 migration
+npx prisma generate                          # 改完 schema 但没改 DB（如修类型）
+npx prisma studio                            # 本地 GUI 看数据
 ```
 
 ---
@@ -56,11 +76,12 @@ LLM_MODEL=deepseek-chat
 | 语言 | TypeScript (strict) | 不允许 any，必须显式类型 |
 | 样式 | Tailwind CSS v4 | 不引入额外 UI 库，组件自己写 |
 | LLM | **DeepSeek API**（OpenAI 兼容） | 详见下方 LLM 集成章节 |
-| 数据解析 | papaparse (CSV) + xlsx (Excel) | 在 API Route 服务端解析 |
+| 数据解析 | papaparse (CSV) + exceljs (Excel) | 在 API Route 服务端解析。xlsx 因 CVE 已弃用 |
 | 图表 | Recharts | 不要用 Chart.js |
 | 状态管理 | React useState + Zustand（如需跨组件） | 不引入 Redux |
-| 数据存储 | Phase 1: 内存 Map / Phase 2: Supabase | 见下方阶段计划 |
-| 代码沙箱 | Phase 1: 内置 JS / Phase 2: E2B | 同上 |
+| 数据存储 | **Prisma + Postgres**（Supabase 仅作 Postgres 宿主） | datasets / messages / users 三张表；migration 走 `prisma migrate dev` |
+| 鉴权 | **Auth.js v5**（Credentials provider） | bcryptjs 哈希、JWT session、`proxy.ts` 路由保护 |
+| SQL 沙箱 | **better-sqlite3** `:memory:` | 替代 node:vm；二级 LLM 生成 SELECT，三层防御 |
 
 **严格约束：**
 - 不引入未列出的第三方库，需要新依赖时先在对话中说明理由
@@ -86,6 +107,68 @@ LLM_MODEL=deepseek-chat
 - **默认启用 Turbopack**（脚手架已加 `--turbopack`），`next dev` 走 Turbopack
 - **React 19.2**：可以用 `use()` Hook 读取 Promise；`forwardRef` 不再必需（ref 作为普通 prop）
 - **Tailwind v4**：配置移到 CSS（`@import "tailwindcss"` + `@theme`），不再有 `tailwind.config.js`
+- **`middleware.ts` 改名 `proxy.ts`**：导出函数名也从 `middleware` 改为 `proxy`。Auth.js v5 官方很多示例仍是旧写法，**不能直接复制**
+
+---
+
+## 鉴权（Auth.js v5 + Prisma）
+
+**两个 auth 文件必须严格分离**（这是 Auth.js v5 的标准结构）：
+
+| 文件 | 用途 | 能 import 什么 |
+|---|---|---|
+| `auth.config.ts` | 给 `proxy.ts` 引入的 edge-safe 部分 | 仅类型 + callbacks，**不能 import Prisma / bcrypt** |
+| `auth.ts` | 完整配置（Credentials provider + Prisma） | 任意（只在 server side 使用） |
+| `proxy.ts` | 路由保护入口 | **只 import `auth.config.ts`** —— 引入 `auth.ts` 会让 Prisma 走 edge runtime 报错 |
+
+**关键设计：**
+- `session.strategy = 'jwt'`：无状态，适配 Vercel Serverless（DB session 每次请求多一次 SELECT）
+- `bcrypt cost factor = 12`：单次 hash ~250ms，被验证够安全
+- 邮箱**统一小写存储**：避免 `Foo@x.com` / `foo@x.com` 注册两个账号
+- `proxy.ts` 的 matcher 必须排除 `/api/auth/*` 和 `/api/auth/register`，否则注册接口自己被拦
+- 已登录访问 `/login` `/register` 自动重定向 `/`；未登录访问其他页面跳 `/login`
+
+**JWT callback 必须把 `user.id` 写进 token**，session callback 再暴露给 `session.user.id`——默认 next-auth session 里没有 `id`。
+
+---
+
+## 数据层（Prisma）
+
+**目录结构：**
+
+```
+lib/
+├── prisma.ts          # PrismaClient 单例（HMR-safe）
+├── db/
+│   ├── datasets.ts    # createDataset / getDataset / listDatasets / deleteDataset
+│   └── messages.ts    # loadConversation / saveUserMessage / saveAssistantMessage / deleteMessagePair
+```
+
+**Schema 关键：**
+- 表名 snake_case（`@@map`），字段 camelCase
+- `columns` / `rows` / `ui` / `llm` 用 `Json`（→ Postgres JSONB）
+- 三条级联：`User → Dataset → Message` 全 `onDelete: Cascade`
+- 列出 datasets 时用 **`jsonb_array_length(rows)` O(1)** 算 rowCount，避免拉全量
+
+**Migration 演进（两条都进 git）：**
+1. `20260519_init` —— Dataset + Message
+2. `20260520_add_user_and_owner` —— User + Dataset.userId 外键
+
+**连接字符串（`.env`，不在 `.env.local`！Prisma CLI 只读 `.env`）：**
+
+```
+DATABASE_URL  # 端口 6543（Supavisor pooler）+ ?pgbouncer=true&connection_limit=1，应用运行时用
+DIRECT_URL    # 端口 5432（直连），仅 migration 用
+```
+
+**密码含特殊字符必须 URL 编码**：`@` → `%40`，`]` → `%5D`，等等。
+
+**Turbopack 必须把 Prisma 标为 external**（否则连接错误）：
+
+```ts
+// next.config.ts
+serverExternalPackages: ['better-sqlite3', '@prisma/client', '@prisma/engines']
+```
 
 ---
 
@@ -346,16 +429,16 @@ LLM 生成最终回答
 ### Phase 1（Week 1）— 跑通核心链路
 **目标：** 上传 CSV → 提问 → 拿到正确回答
 
-必须完成：
-- [ ] `lib/llm.ts` DeepSeek 接入
-- [ ] `lib/tools/definitions.ts` 4 个工具定义
-- [ ] `lib/tools/executor.ts` 工具执行（用 JS 实现 inspect 和 run_analysis）
-- [ ] `lib/agent.ts` 主循环 + SSE 推送
-- [ ] `lib/dataset-store.ts` 内存存储
-- [ ] `app/api/upload/route.ts` CSV/Excel 解析
-- [ ] `app/api/agent/route.ts` SSE 流式接口
-- [ ] `hooks/use-agent.ts` 前端 SSE 消费
-- [ ] 最简 UI（能上传 + 能聊天 + 能看到 Agent 步骤）
+已完成：
+- [x] `lib/llm.ts` DeepSeek 接入
+- [x] `lib/tools/definitions.ts` 4 个工具定义
+- [x] `lib/tools/executor.ts` 工具执行（最终 SQL 跑 better-sqlite3 :memory:）
+- [x] `lib/agent.ts` 主循环 + SSE 推送
+- [x] 数据集存储（Phase 4 迁到 Prisma：`lib/db/datasets.ts`）
+- [x] `app/api/upload/route.ts` CSV/Excel 解析
+- [x] `app/api/agent/route.ts` SSE 流式接口
+- [x] `hooks/use-agent.ts` 前端 SSE 消费
+- [x] 完整 UI（数据集列表 / 对话 / 图表 / 报告卡片 / 主题切换）
 
 **Phase 1 验收脚本：**
 ```bash
@@ -374,11 +457,19 @@ curl -F "file=@sales.csv" http://localhost:3000/api/upload
 - [ ] Agent 步骤折叠展开的 UI 打磨
 - [ ] 错误处理完善
 
-### Phase 3（Week 3）— 生产可用
-- [ ] Supabase 持久化（数据集 + 对话历史）
-- [ ] 报告导出（Markdown 下载）
-- [ ] 部署到 Vercel
-- [ ] 准备 2~3 个 Demo 数据集
+### Phase 3（Week 3）— 生产可用 ✅
+- [x] Supabase 持久化（数据集 + 对话历史）
+- [x] 报告导出（HTML 下载，含内嵌 SVG 图表）
+- [x] 部署到 Vercel
+- [x] 准备 demo 数据集 + 一键试用
+
+### Phase 4（Week 4）— 用户鉴权 + Prisma 迁移 ✅
+- [x] 数据访问层从 `@supabase/supabase-js` 迁到 Prisma（schema 演进 2 次 migration）
+- [x] Auth.js v5 接入：Credentials provider + JWT + bcrypt
+- [x] `proxy.ts` 路由保护（Next.js 16 新名）+ API 路径返回 401 JSON（不重定向）
+- [x] `/api/auth/register` 注册接口
+- [x] 6 个分析路由加 `auth()` + owner check（数据层强制传 userId，编译期防漏）
+- [x] 登录 / 注册页面 + Header UserMenu（用户邮箱 + 退出按钮）
 
 ---
 
@@ -399,6 +490,12 @@ curl -F "file=@sales.csv" http://localhost:3000/api/upload
 
 > 在开始编码前，请确认你已经阅读到这里。每次新会话先回复："已阅读 CLAUDE.md，当前处于 Phase X，下一步任务是 YYY"，等我确认后再动手。
 
-**当前状态：** Phase 1，未开始
+**当前状态：** Phase 4（鉴权改造）✅ **全部完成**（S1–S10）
 
-**下一步：** 初始化 Next.js 项目骨架 + 安装依赖
+**Phase 4 交付物**：Prisma 全栈迁移 + Auth.js v5 邮箱密码登录 + 多租户 owner check + 登录/注册/Header UI。完整 14 项 e2e 验收通过。
+
+**下一步候选**（按优先级，等用户拍板）：
+- Phase 5: Prisma 6 → 7 升级（独立立项，详见 PROGRESS.md §6.6 草案）
+- 注册时发邮件验证（防 typo / 防爬虫）
+- OAuth provider（Google / GitHub）
+- 邮箱失败 rate limit（防暴力破解）

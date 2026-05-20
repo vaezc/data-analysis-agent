@@ -65,7 +65,8 @@ Agent:   [Database]    正在读取数据结构...         ✓
 - 🌊 **全程流式** — 文字 / 工具步骤 / 图表 / 报告通过 SSE 实时推送
 - 🧠 **支持 DeepSeek V4 thinking mode** — `reasoning_content` 字段按协议回 echo
 - 🗃️ **真 SQL 执行** — LLM 生成 SQLite SQL → better-sqlite3 `:memory:` 执行，支持 GROUP BY / 窗口函数 / CTE
-- 💾 **Supabase 持久化** — datasets / messages 双表，刷新不丢数据，Vercel 跨函数隔离已解决
+- 💾 **Prisma + Postgres 持久化** — datasets / messages / users 三表，migration 进 git，刷新不丢数据
+- 🔐 **邮箱密码登录** — Auth.js v5 + bcrypt(12) + JWT session，`proxy.ts` 路由级保护、owner 校验防越权
 - 📊 **4 种图表类型** — bar / line / pie / scatter，基于 Recharts，主题色自动跟随
 - 📄 **HTML 报告导出** — 内嵌 SVG 图表，离线可双击打开，无外部依赖
 - 🌗 **明 / 暗主题** — 14 个语义化 CSS 变量，组件零硬编码颜色
@@ -86,7 +87,8 @@ Agent:   [Database]    正在读取数据结构...         ✓
 | 语言 | **TypeScript strict** | 类型在 SSE / tool / LLM 协议间流转，必须 strict |
 | LLM | **DeepSeek V4** (OpenAI 兼容) | 中文好、价格低、支持 Tool Use 与 thinking mode |
 | 流式 | **原生 SSE + ReadableStream** | 单向流足够；WebSocket 是双向通信，本场景过度设计 |
-| 持久化 | **Supabase** (Postgres) | datasets + messages 双表；service_role 后端代理 |
+| 持久化 | **Prisma + Postgres**（Supabase 仅作宿主） | datasets + messages + users 三张表；migration 进 git 可追溯 |
+| 鉴权 | **Auth.js v5** + bcryptjs | Credentials provider + JWT session + `proxy.ts` 路由保护 |
 | 图表 | **Recharts** | React 原生 + SVG 输出（可抓取嵌入报告） |
 | 样式 | **Tailwind v4** + CSS variables | `@theme inline` 让 token 体系天然落地 |
 | 主题 | next-themes | SSR 安全、不闪 |
@@ -148,8 +150,21 @@ sequenceDiagram
 git clone https://github.com/vaezc/data-analysis-agent.git
 cd data-analysis-agent
 npm install
-cp .env.local.example .env.local
-# 编辑 .env.local，把 LLM_API_KEY 填上 sk-xxx
+
+# 配置环境变量（分两个文件，照 .env.example 填）
+cp .env.example .env.local
+# .env 放数据库连接（Prisma CLI 只认 .env）
+cat > .env <<EOF
+DATABASE_URL="postgresql://...:6543/postgres?pgbouncer=true&connection_limit=1"
+DIRECT_URL="postgresql://...:5432/postgres"
+EOF
+# .env.local 放 LLM key、AUTH_SECRET 等
+# 生成 AUTH_SECRET: openssl rand -base64 32
+
+# 初始化数据库表结构
+npx prisma migrate deploy   # 生产/CI 用 deploy；本地开发用 prisma migrate dev
+
+# 启动
 npm run dev
 ```
 
@@ -166,13 +181,17 @@ npm run dev
 ```bash
 # 1. push 到自己的 GitHub 仓库
 # 2. Vercel 导入项目
-# 3. 添加 5 个环境变量（Production scope）：
-#    LLM_PROVIDER                = deepseek
-#    LLM_API_KEY                 = sk-xxx
-#    LLM_MODEL                   = deepseek-v4-flash
-#    SUPABASE_URL                = https://xxx.supabase.co
-#    SUPABASE_SERVICE_ROLE_KEY   = sb_secret_xxx
-# 4. 在 Supabase 控制台跑建表 SQL（datasets + messages，见 lib/messages-store.ts）
+# 3. 添加环境变量（Production scope）：
+#    LLM_PROVIDER          = deepseek
+#    LLM_API_KEY           = sk-xxx
+#    LLM_MODEL             = deepseek-v4-flash
+#    DATABASE_URL          = postgresql://...:6543/postgres?pgbouncer=true&connection_limit=1
+#    DIRECT_URL            = postgresql://...:5432/postgres
+#    AUTH_SECRET           = <openssl rand -base64 32>
+#    AUTH_URL              = https://<your-domain>.vercel.app
+#    AUTH_TRUST_HOST       = true   # Vercel preview / 自定义域名必加
+# 4. 在 build command 里加 prisma migrate deploy：
+#    "build": "prisma migrate deploy && next build"
 # 5. Deploy
 ```
 
