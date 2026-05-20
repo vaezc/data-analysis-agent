@@ -149,8 +149,8 @@ git clone https://github.com/vaezc/data-analysis-agent.git
 cd data-analysis-agent
 npm install
 
-# 配置环境变量（分两个文件，照 .env.example 填）
-cp .env.example .env.local
+# 配置环境变量（分两个文件）
+cp .env.local.example .env.local
 # .env 放数据库连接（Prisma CLI 只认 .env）
 cat > .env <<EOF
 DATABASE_URL="postgresql://...:6543/postgres?pgbouncer=true&connection_limit=1"
