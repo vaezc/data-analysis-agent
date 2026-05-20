@@ -43,5 +43,5 @@ yarn-error.log*
 next-env.d.ts
 
 # 私人学习 / 面试材料：本地保留，不公开
-INTERVIEW.md
-FLOW.md
+# 含 LEARNING.md / INTERVIEW.md / FLOW.md / DATABASE.md 等
+/learning/

@@ -13,7 +13,7 @@
 [![DeepSeek](https://img.shields.io/badge/DeepSeek-V4-6366F1)](https://platform.deepseek.com)
 [![Live](https://img.shields.io/badge/Live-Demo-22c55e?logo=vercel)](https://data-analysis-agent-omega.vercel.app)
 
-[🌐 **Live Demo**](https://data-analysis-agent-omega.vercel.app) · [📖 学习笔记](./LEARNING.md) · [📊 进度看板](./PROGRESS.md)
+[🌐 **Live Demo**](https://data-analysis-agent-omega.vercel.app) · [📊 进度看板](./PROGRESS.md) · [🚀 部署指南](./DEPLOY.md)
 
 </div>
 
@@ -65,7 +65,7 @@ Agent:   [Database]    正在读取数据结构...         ✓
 - 🌊 **全程流式** — 文字 / 工具步骤 / 图表 / 报告通过 SSE 实时推送
 - 🧠 **支持 DeepSeek V4 thinking mode** — `reasoning_content` 字段按协议回 echo
 - 🗃️ **真 SQL 执行** — LLM 生成 SQLite SQL → better-sqlite3 `:memory:` 执行，支持 GROUP BY / 窗口函数 / CTE
-- 💾 **Prisma + Postgres 持久化** — datasets / messages / users 三表，migration 进 git，刷新不丢数据
+- 💾 **Prisma + Postgres 持久化** — users / accounts / datasets / messages 等 6 表，5 次 migration 进 git，刷新不丢数据
 - 🔐 **邮箱密码登录** — Auth.js v5 + bcrypt(12) + JWT session，`proxy.ts` 路由级保护、owner 校验防越权
 - 📊 **4 种图表类型** — bar / line / pie / scatter，基于 Recharts，主题色自动跟随
 - 📄 **HTML 报告导出** — 内嵌 SVG 图表，离线可双击打开，无外部依赖
@@ -87,7 +87,7 @@ Agent:   [Database]    正在读取数据结构...         ✓
 | 语言 | **TypeScript strict** | 类型在 SSE / tool / LLM 协议间流转，必须 strict |
 | LLM | **DeepSeek V4** (OpenAI 兼容) | 中文好、价格低、支持 Tool Use 与 thinking mode |
 | 流式 | **原生 SSE + ReadableStream** | 单向流足够；WebSocket 是双向通信，本场景过度设计 |
-| 持久化 | **Prisma + Postgres**（Supabase 仅作宿主） | datasets + messages + users 三张表；migration 进 git 可追溯 |
+| 持久化 | **Prisma + Postgres**（Supabase 仅作宿主） | users / accounts / datasets / messages 等 6 表；5 次 migration 进 git 可追溯 |
 | 鉴权 | **Auth.js v5** + bcryptjs | Credentials provider + JWT session + `proxy.ts` 路由保护 |
 | 图表 | **Recharts** | React 原生 + SVG 输出（可抓取嵌入报告） |
 | 样式 | **Tailwind v4** + CSS variables | `@theme inline` 让 token 体系天然落地 |
@@ -132,8 +132,6 @@ sequenceDiagram
         end
     end
 ```
-
-完整数据形态变换 + 真实 JSON 示例见 [`LEARNING.md § 2.4`](./LEARNING.md)。
 
 ---
 
@@ -216,14 +214,24 @@ data-analysis-agent/
 ├── lib/
 │   ├── agent.ts                          # ★ Agent 主循环
 │   ├── llm.ts                            # Provider 抽象
-│   ├── supabase.ts                       # Supabase server client 单例
-│   ├── dataset-store.ts                  # 数据集 CRUD（Supabase 后端）
-│   ├── messages-store.ts                 # 对话消息持久化 + 滑动窗口
+│   ├── prisma.ts                         # Prisma client 单例（HMR-safe）
+│   ├── db/
+│   │   ├── datasets.ts                   # 数据集 CRUD + owner check
+│   │   └── messages.ts                   # 对话持久化 + 滑动窗口 + 配对删除
+│   ├── auth/
+│   │   ├── email.ts                      # Resend 邮箱验证发送
+│   │   └── rate-limit.ts                 # 登录失败 rate limit
 │   ├── suggestions.ts                    # LLM 生成自然中文提问建议
 │   └── tools/
 │       ├── definitions.ts                # 工具 schema（给 LLM 看）
 │       ├── executor.ts                   # 工具执行 + 截断
 │       └── sqlite-runner.ts              # ★ better-sqlite3 SQL 沙箱
+├── prisma/
+│   ├── schema.prisma                     # 6 表 schema
+│   └── migrations/                       # 5 次 migration 进 git
+├── auth.ts                               # Auth.js v5 完整配置
+├── auth.config.ts                        # edge-safe 部分（给 proxy.ts 用）
+├── proxy.ts                              # Next.js 16 路由保护（旧名 middleware.ts）
 ├── hooks/
 │   └── use-agent.ts                      # SSE 消费 + per-dataset 历史
 ├── components/chat/
@@ -232,7 +240,7 @@ data-analysis-agent/
 │   ├── ChartRenderer.tsx
 │   ├── ReportCard.tsx                    # HTML 导出 + 内嵌 SVG
 │   └── StepList.tsx
-└── types/index.ts                  # 全局类型（StreamEvent / ChatMessage）
+└── types/index.ts                        # 全局类型（StreamEvent / ChatMessage）
 ```
 
 ---
@@ -241,24 +249,19 @@ data-analysis-agent/
 
 | 想了解什么 | 看哪里 |
 |---|---|
-| **Agent 主循环 + 三种 delta 累积** | [`lib/agent.ts`](./lib/agent.ts) · [LEARNING.md § 3.1](./LEARNING.md) |
-| **SSE 流式协议 + UTF-8 安全** | [`hooks/use-agent.ts`](./hooks/use-agent.ts) · [LEARNING.md § 3.2](./LEARNING.md) |
-| **Tool result 截断（控 token）** | [`lib/tools/executor.ts`](./lib/tools/executor.ts) · [LEARNING.md § 6.2](./LEARNING.md) |
-| **HTML 报告内嵌 SVG 图表** | [`components/chat/ReportCard.tsx`](./components/chat/ReportCard.tsx) · [LEARNING.md § 4.3](./LEARNING.md) |
-| **Sticky-to-bottom 滚动** | [`components/chat/ChatPanel.tsx`](./components/chat/ChatPanel.tsx) · [LEARNING.md § 4.2](./LEARNING.md) |
-| **为什么不用 Zustand**（状态管理决策） | [LEARNING.md § 3.8](./LEARNING.md) |
+| **Agent 主循环 + 三种 delta 累积** | [`lib/agent.ts`](./lib/agent.ts) |
+| **SSE 流式协议 + UTF-8 安全** | [`hooks/use-agent.ts`](./hooks/use-agent.ts) |
+| **Tool result 截断（控 token）** | [`lib/tools/executor.ts`](./lib/tools/executor.ts) |
+| **HTML 报告内嵌 SVG 图表** | [`components/chat/ReportCard.tsx`](./components/chat/ReportCard.tsx) |
+| **Sticky-to-bottom 滚动** | [`components/chat/ChatPanel.tsx`](./components/chat/ChatPanel.tsx) |
+| **Prisma 数据访问层 + owner check** | [`lib/db/datasets.ts`](./lib/db/datasets.ts) · [`lib/db/messages.ts`](./lib/db/messages.ts) |
 
 ---
 
 ## 文档导览
 
-- **[`LEARNING.md`](./LEARNING.md)** — 学习笔记 + 面试备忘
-  - Mermaid 时序图 / 流程图
-  - 9 个核心架构决策（带"为什么"）
-  - 5 个实现亮点深度展开
-  - 25+ 道面试问答（按系统设计 / 性能 / 安全 / 调试 / 业务 / 编码六类）
-  - 附录：一次完整请求的数据流追踪（含真实 JSON 示例）
 - **[`PROGRESS.md`](./PROGRESS.md)** — 项目蓝图 + 局限登记册 + 优化项 backlog
+- **[`DEPLOY.md`](./DEPLOY.md)** — Vercel 端到端部署 checklist（13 项环境变量）
 - **[`CLAUDE.md`](./CLAUDE.md)** — 开发规范与约束
 
 ---
