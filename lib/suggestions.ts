@@ -45,6 +45,7 @@ export async function generateSuggestions({
       { role: 'user', content: userMsg },
     ],
     temperature: 0.7, // 适度随机让建议有变化
+    debugTag: 'suggestions',
   })
 
   const text = completion.choices[0]?.message?.content?.trim() ?? ''

@@ -104,6 +104,151 @@ export interface ChatCompletionParams {
   tools?: ChatCompletionTool[]
   /** 默认 0.7；analysis 类任务可调低（如 0.2） */
   temperature?: number
+  /** 可选 tag，用于在 debug log 里标识这是哪个调用点（如 'agent' / 'sql-gen'） */
+  debugTag?: string
+}
+
+// ============================================================
+// Debug logging：设置 LLM_DEBUG=1 启用
+//
+// 打开后会把每次 LLM 请求 + 响应打到终端（仅服务端日志可见）。
+// 用 [LLM #N tag →] / [LLM #N tag ←] 配对，方便追溯主 Agent vs 二级 LLM。
+// 长字段截断到 LLM_DEBUG_MAX_CHARS（默认 1000），LLM_DEBUG=full 关闭截断。
+// ============================================================
+
+let _callCounter = 0
+
+function isDebug(): boolean {
+  return Boolean(process.env.LLM_DEBUG)
+}
+
+function truncFor(s: string): string {
+  if (process.env.LLM_DEBUG === 'full') return s
+  const max = Number(process.env.LLM_DEBUG_MAX_CHARS) || 1000
+  if (s.length <= max) return s
+  return `${s.slice(0, max)}…[+${s.length - max} chars]`
+}
+
+function summarizeMessages(
+  messages: ChatCompletionMessageParam[],
+): unknown[] {
+  return messages.map((m) => {
+    const role = m.role
+    const content =
+      typeof m.content === 'string'
+        ? truncFor(m.content)
+        : Array.isArray(m.content)
+          ? m.content.map((p) =>
+              p.type === 'text'
+                ? { type: 'text', text: truncFor(p.text) }
+                : { type: p.type, '...': true },
+            )
+          : m.content
+    // assistant 的 tool_calls / tool role 的 tool_call_id 都打出来
+    const out: Record<string, unknown> = { role, content }
+    if ('tool_calls' in m && m.tool_calls) {
+      out.tool_calls = m.tool_calls.map((tc) =>
+        tc.type === 'function'
+          ? {
+              id: tc.id,
+              name: tc.function.name,
+              arguments: truncFor(tc.function.arguments),
+            }
+          : { id: tc.id, type: tc.type },
+      )
+    }
+    if ('tool_call_id' in m && m.tool_call_id) {
+      out.tool_call_id = m.tool_call_id
+    }
+    return out
+  })
+}
+
+function logRequest(
+  label: string,
+  cfg: LlmConfig,
+  params: ChatCompletionParams,
+  streaming: boolean,
+): void {
+  if (!isDebug()) return
+  console.log(
+    `\n[LLM ${label} →]${streaming ? ' (stream)' : ''}`,
+    JSON.stringify(
+      {
+        model: cfg.model,
+        temperature: params.temperature ?? 0.7,
+        tools:
+          params.tools?.map((t) =>
+            t.type === 'function' ? t.function.name : t.type,
+          ) ?? null,
+        messages: summarizeMessages(params.messages),
+      },
+      null,
+      2,
+    ),
+  )
+}
+
+function logResponseNonStream(
+  label: string,
+  resp: ChatCompletion,
+): void {
+  if (!isDebug()) return
+  const choice = resp.choices[0]
+  console.log(
+    `\n[LLM ${label} ←]`,
+    JSON.stringify(
+      {
+        finish_reason: choice?.finish_reason,
+        content: choice?.message.content
+          ? truncFor(choice.message.content)
+          : null,
+        tool_calls: choice?.message.tool_calls?.map((tc) =>
+          tc.type === 'function'
+            ? {
+                id: tc.id,
+                name: tc.function.name,
+                arguments: truncFor(tc.function.arguments),
+              }
+            : { id: tc.id, type: tc.type },
+        ),
+        usage: resp.usage,
+      },
+      null,
+      2,
+    ),
+  )
+}
+
+function logResponseStreamSummary(
+  label: string,
+  summary: {
+    finish_reason: string | null
+    content: string
+    reasoning: string
+    toolCalls: { name: string; args: string }[]
+  },
+): void {
+  if (!isDebug()) return
+  console.log(
+    `\n[LLM ${label} ←] (stream done)`,
+    JSON.stringify(
+      {
+        finish_reason: summary.finish_reason,
+        content: summary.content ? truncFor(summary.content) : null,
+        reasoning_chars: summary.reasoning.length,
+        reasoning_preview: summary.reasoning
+          ? truncFor(summary.reasoning)
+          : null,
+        tool_calls: summary.toolCalls.map((tc) => ({
+          name: tc.name,
+          arguments: truncFor(tc.args),
+        })),
+      },
+      null,
+      2,
+    ),
+  )
 }
 
 /**
@@ -116,30 +261,80 @@ export async function chatCompletion(
   const cfg = loadConfig()
   const client = getClient()
 
-  return client.chat.completions.create({
+  const label = `#${++_callCounter}${params.debugTag ? ` ${params.debugTag}` : ''}`
+  logRequest(label, cfg, params, false)
+
+  const resp = await client.chat.completions.create({
     model: cfg.model,
     messages: params.messages,
     tools: params.tools,
     tool_choice: params.tools ? 'auto' : undefined,
     temperature: params.temperature ?? 0.7,
   })
+
+  logResponseNonStream(label, resp)
+  return resp
 }
 
 /**
  * 流式版本。返回 AsyncIterable<ChatCompletionChunk>，调用方 for-await 消费。
  * 调用方负责累积 chunk 的 content / tool_calls / reasoning_content。
+ *
+ * 注：实际上是 async generator——await 返回 generator 本身，再 for-await 消费。
  */
-export function chatCompletionStream(params: ChatCompletionParams) {
+export async function* chatCompletionStream(params: ChatCompletionParams) {
   const cfg = loadConfig()
   const client = getClient()
 
-  return client.chat.completions.create({
+  const label = `#${++_callCounter}${params.debugTag ? ` ${params.debugTag}` : ''}`
+  logRequest(label, cfg, params, true)
+
+  const stream = await client.chat.completions.create({
     model: cfg.model,
     messages: params.messages,
     tools: params.tools,
     tool_choice: params.tools ? 'auto' : undefined,
     temperature: params.temperature ?? 0.7,
     stream: true,
+  })
+
+  // 累积流式 chunk 用于完成后打 summary。yield 原样透传，不影响调用方。
+  let content = ''
+  let reasoning = ''
+  let finishReason: string | null = null
+  const toolAcc = new Map<number, { name: string; args: string }>()
+
+  for await (const chunk of stream) {
+    const choice = chunk.choices[0]
+    if (choice) {
+      const delta = choice.delta as {
+        content?: string | null
+        reasoning_content?: string | null
+        tool_calls?: Array<{
+          index: number
+          function?: { name?: string; arguments?: string }
+        }>
+      }
+      if (delta?.content) content += delta.content
+      if (delta?.reasoning_content) reasoning += delta.reasoning_content
+      if (delta?.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const cur = toolAcc.get(tc.index) ?? { name: '', args: '' }
+          if (tc.function?.name) cur.name = tc.function.name
+          if (tc.function?.arguments) cur.args += tc.function.arguments
+          toolAcc.set(tc.index, cur)
+        }
+      }
+      if (choice.finish_reason) finishReason = choice.finish_reason
+    }
+    yield chunk
+  }
+
+  logResponseStreamSummary(label, {
+    finish_reason: finishReason,
+    content,
+    reasoning,
+    toolCalls: [...toolAcc.values()],
   })
 }
 
