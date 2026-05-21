@@ -34,10 +34,13 @@ const DEMOS: DemoSpec[] = [
 
 export default function Home() {
   const [datasets, setDatasets] = useState<UploadedDataset[]>([])
+  // 三态区分：未加载完 / 加载完为空 / 加载完有数据
+  // 关键作用：避免初次进入时"先闪一下 demo,再被真实数据集列表替换"
+  const [datasetsLoaded, setDatasetsLoaded] = useState(false)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [loadingDemo, setLoadingDemo] = useState<string | null>(null)
 
-  // 启动时从 Supabase 加载已上传的数据集列表（Phase 3 持久化）
+  // 启动时加载已上传的数据集列表
   useEffect(() => {
     let cancelled = false
     fetch('/api/datasets')
@@ -47,6 +50,9 @@ export default function Home() {
       })
       .catch(() => {
         // 加载失败不致命：用户仍可上传新数据集
+      })
+      .finally(() => {
+        if (!cancelled) setDatasetsLoaded(true)
       })
     return () => {
       cancelled = true
@@ -155,7 +161,11 @@ export default function Home() {
             )}
           </div>
 
-          {datasets.length === 0 ? (
+          {!datasetsLoaded ? (
+            // 未加载完不渲染任何东西 —— 通常 fetch <300ms,肉眼不可见;
+            // 若加载完仍为空再展示 demo 区,避免"闪现 demo"
+            null
+          ) : datasets.length === 0 ? (
             <div className="space-y-3">
               <div className="text-xs text-fg-subtle leading-relaxed">
                 上传 CSV / Excel 文件，或试用样例：
