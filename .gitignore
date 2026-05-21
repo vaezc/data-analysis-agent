@@ -45,3 +45,7 @@ next-env.d.ts
 # 私人学习 / 面试材料：本地保留，不公开
 # 含 LEARNING.md / INTERVIEW.md / FLOW.md / DATABASE.md 等
 /learning/
+
+# Claude Code 个人配置（含本机路径、个人权限白名单），不公开
+# 项目共享的 .claude/settings.json 应 commit;此文件按 .local 约定本地保留
+.claude/settings.local.json
