@@ -226,7 +226,6 @@ function escapeHtml(s: string): string {
 
 /** 跨平台合法的文件名：去掉 < > : " / \ | ? * 和控制字符，限长 80 */
 function sanitizeFilename(name: string): string {
-  // eslint-disable-next-line no-control-regex
   const cleaned = name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim()
   return cleaned.slice(0, 80) || 'report'
 }

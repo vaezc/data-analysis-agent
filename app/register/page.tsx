@@ -110,7 +110,7 @@ export default function RegisterPage() {
             )}
           </p>
           <p className="mt-4 text-xs text-fg-subtle">
-            没收到？检查垃圾邮件文件夹，或者去登录页点击"重发验证邮件"。
+            没收到？检查垃圾邮件文件夹，或者去登录页点击「重发验证邮件」。
           </p>
           <Link
             href="/login"

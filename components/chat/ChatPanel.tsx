@@ -107,12 +107,15 @@ export function ChatPanel({ datasetId, columns }: ChatPanelProps) {
 
   useEffect(() => {
     if (!datasetId) {
+      // Switching datasets intentionally resets the suggestion slot before async data arrives.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLlmSuggestions(null);
       return;
     }
     // 命中缓存：直接用，不发请求
     const cached = suggestionsCacheRef.current.get(datasetId);
     if (cached) {
+      // Cache hits should update immediately so old dataset suggestions do not flash.
       setLlmSuggestions(cached);
       return;
     }

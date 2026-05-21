@@ -47,15 +47,18 @@ function VerifyingShell() {
 function VerifyEmailInner() {
   const params = useSearchParams()
   const token = params.get('token')
-  const [status, setStatus] = useState<Status>({ kind: 'verifying' })
+  const [status, setStatus] = useState<Status>(() =>
+    token
+      ? { kind: 'verifying' }
+      : {
+          kind: 'error',
+          message: '缺少验证 token，请检查邮件链接',
+          code: 'MISSING_TOKEN',
+        },
+  )
 
   useEffect(() => {
     if (!token) {
-      setStatus({
-        kind: 'error',
-        message: '缺少验证 token，请检查邮件链接',
-        code: 'MISSING_TOKEN',
-      })
       return
     }
 
@@ -145,7 +148,7 @@ function VerifyEmailInner() {
                   href="/login"
                   className="text-accent hover:underline underline-offset-2"
                 >
-                  去登录页点击"重发验证邮件"
+                  去登录页点击「重发验证邮件」
                 </Link>
               )}
               {status.code === 'ALREADY_VERIFIED' && (

@@ -65,6 +65,8 @@ export function useAgent({ datasetId }: UseAgentParams): UseAgentReturn {
   useEffect(() => {
     abortRef.current?.abort()
     abortRef.current = null
+    // Dataset switches deliberately reset transient UI state before loading history.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsStreaming(false)
     setError(null)
 
