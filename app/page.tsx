@@ -162,9 +162,7 @@ export default function Home() {
           </div>
 
           {!datasetsLoaded ? (
-            // 未加载完不渲染任何东西 —— 通常 fetch <300ms,肉眼不可见;
-            // 若加载完仍为空再展示 demo 区,避免"闪现 demo"
-            null
+            <DatasetListSkeleton />
           ) : datasets.length === 0 ? (
             <div className="space-y-3">
               <div className="text-xs text-fg-subtle leading-relaxed">
@@ -282,6 +280,30 @@ export default function Home() {
 
         <ChatPanel datasetId={activeId} />
       </main>
+    </div>
+  )
+}
+
+// ============================================================
+// Sidebar 数据集列表骨架屏
+//
+// 形态贴合真实 item：rounded-md + px-3 py-2 + 两行（标题 + meta 行）。
+// 用 bg-surface（语义 token,明暗主题跟随）+ animate-pulse 提示加载中。
+// 渲染 3 条:有节奏感又不至于太"假数据"。宽度故意错开避免机械感。
+// ============================================================
+const SKELETON_WIDTHS = ['w-3/4', 'w-2/3', 'w-4/5'] as const
+
+function DatasetListSkeleton() {
+  return (
+    <div className="space-y-1" aria-busy="true" aria-label="加载数据集列表">
+      {SKELETON_WIDTHS.map((titleWidth, i) => (
+        <div key={i} className="rounded-md px-3 py-2">
+          <div
+            className={`h-4 rounded bg-surface animate-pulse ${titleWidth}`}
+          />
+          <div className="h-3 w-1/3 rounded bg-surface animate-pulse mt-1.5" />
+        </div>
+      ))}
     </div>
   )
 }
