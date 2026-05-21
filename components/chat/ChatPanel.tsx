@@ -4,101 +4,39 @@ import { Database, Loader2, RotateCcw, Send, Sparkles, X } from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type FormEvent,
 } from "react";
 import { useAgent } from "@/hooks/use-agent";
-import type { Column } from "@/types";
 import { MessageBubble } from "./MessageBubble";
 
 interface ChatPanelProps {
   datasetId: string | null;
-  /** 当前激活数据集的列 schema —— 用于动态生成示例问题 + 输入框 placeholder */
-  columns?: Column[];
 }
 
 // ============================================================
-// 动态提示生成：根据 columns 的类型组合套模板，生成 2~3 个有针对性的问题
+// 静态 fallback —— LLM 异步建议返回前临时显示。
 //
-// 不调 LLM（即时、无网络成本、不烧 token）。模板覆盖三种典型分析场景：
-//   1. 分类对比：string × number → "哪个 X 的 Y 最高"
-//   2. 时间趋势：date × number → "按 X 看 Y 的趋势"
-//   3. 单变量统计：number → "X 的统计指标"
+// 故意不用列名拼模板：列名常是 snake_case 英文（如 employee_id /
+// base_salary），直接塞进中文句子割裂感强。改用通用"问题骨架"，
+// 覆盖三种典型分析场景，对任何 schema 都自然。
+// LLM suggestions（/api/datasets/[id]/suggestions）返回后会立即覆盖。
 // ============================================================
 
-const DEFAULT_SUGGESTIONS = [
-  "这份数据一共有多少行？",
-  "每列分别是什么类型？",
-  "数据里有缺失值吗？",
+const FALLBACK_SUGGESTIONS = [
+  "找出关键指标最高的几项",
+  "按主要分类做一次汇总对比",
+  "看看数据里有什么有趣的趋势",
 ];
 
-function generateSuggestions(columns: Column[] | undefined): string[] {
-  if (!columns || columns.length === 0) return DEFAULT_SUGGESTIONS;
+const PLACEHOLDER_WITH_DATASET = "试试问：最高、平均、或按某个维度分组";
+const PLACEHOLDER_NO_DATASET = "请先选择数据集";
 
-  const numCols = columns.filter((c) => c.type === "number");
-  const strCols = columns.filter((c) => c.type === "string");
-  const dateCols = columns.filter((c) => c.type === "date");
-
-  const out: string[] = [];
-
-  // 分类对比
-  if (strCols.length > 0 && numCols.length > 0) {
-    out.push(`哪个 ${strCols[0].name} 的 ${numCols[0].name} 最高？`);
-  }
-
-  // 时间趋势 / 二级分组
-  if (dateCols.length > 0 && numCols.length > 0) {
-    out.push(`按 ${dateCols[0].name} 看 ${numCols[0].name} 的变化趋势`);
-  } else if (strCols.length > 1 && numCols.length > 0) {
-    out.push(`按 ${strCols[1].name} 分组统计 ${numCols[0].name} 的总和`);
-  }
-
-  // 单变量统计
-  if (numCols.length > 0) {
-    out.push(`${numCols[0].name} 的平均值、最大值、最小值分别是多少？`);
-  } else if (strCols.length > 0) {
-    out.push(`${strCols[0].name} 有哪些不同的取值？`);
-  }
-
-  // 兜底凑齐 3 条（避免列结构极简时只显示 1~2 条建议）
-  const fallbacks = DEFAULT_SUGGESTIONS;
-  let idx = 0;
-  while (out.length < 3 && idx < fallbacks.length) {
-    if (!out.includes(fallbacks[idx])) out.push(fallbacks[idx]);
-    idx++;
-  }
-
-  return out.slice(0, 3);
-}
-
-function generatePlaceholder(columns: Column[] | undefined): string {
-  if (!columns || columns.length === 0) {
-    return "提个问题，让 Agent 帮你分析这份数据";
-  }
-  const numCols = columns.filter((c) => c.type === "number");
-  const strCols = columns.filter((c) => c.type === "string");
-
-  if (strCols.length > 0 && numCols.length > 0) {
-    return `例如：哪个 ${strCols[0].name} 的 ${numCols[0].name} 最高？`;
-  }
-  if (numCols.length > 0) {
-    return `例如：${numCols[0].name} 的平均值是多少？`;
-  }
-  return "提个问题，让 Agent 帮你分析这份数据";
-}
-
-export function ChatPanel({ datasetId, columns }: ChatPanelProps) {
-  // 模板 fallback —— LLM suggestions 未返回前显示
-  const templateSuggestions = useMemo(
-    () => generateSuggestions(columns),
-    [columns],
-  );
-  const placeholder = useMemo(() => {
-    if (!datasetId) return "请先选择数据集";
-    return generatePlaceholder(columns);
-  }, [datasetId, columns]);
+export function ChatPanel({ datasetId }: ChatPanelProps) {
+  const placeholder = datasetId
+    ? PLACEHOLDER_WITH_DATASET
+    : PLACEHOLDER_NO_DATASET;
 
   // LLM 生成的更自然 suggestions（异步加载）
   // 会话内 cache by datasetId 避免切回时重复调用
@@ -143,7 +81,7 @@ export function ChatPanel({ datasetId, columns }: ChatPanelProps) {
     };
   }, [datasetId]);
 
-  const suggestions = llmSuggestions ?? templateSuggestions;
+  const suggestions = llmSuggestions ?? FALLBACK_SUGGESTIONS;
 
   const {
     messages,

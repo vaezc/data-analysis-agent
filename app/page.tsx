@@ -270,7 +270,7 @@ export default function Home() {
           )}
         </header>
 
-        <ChatPanel datasetId={activeId} columns={active?.columns} />
+        <ChatPanel datasetId={activeId} />
       </main>
     </div>
   )
