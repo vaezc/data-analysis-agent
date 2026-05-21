@@ -15,6 +15,10 @@
 
 [🌐 **Live Demo**](https://data-analysis-agent-omega.vercel.app) · [📊 进度看板](./PROGRESS.md) · [🚀 部署指南](./DEPLOY.md)
 
+<br />
+
+<img src="docs/screenshots/hero-showcase.png" alt="Data Analysis Agent product showcase" width="100%" />
+
 </div>
 
 ---
@@ -47,15 +51,19 @@ Agent:   [Database]    正在读取数据结构...         ✓
 
 ## 演示
 
-> 截图占位 — 添加 2~3 张：上传界面 / Agent 流式步骤 / 图表 + 报告下载
->
-> 建议录一段 30s GIF 放这里（Loom / CleanShot 都可）
+面试现场可以直接照着 [`docs/demo-script.md`](./docs/demo-script.md) 跑一遍：选择内置「销售数据」demo，提问「哪个区域销售额最高？请生成柱状图」，再让 Agent 生成简短报告。
 
-<!--
-![上传界面](docs/screenshots/upload.png)
-![Agent 流式步骤](docs/screenshots/agent-streaming.png)
-![图表与报告](docs/screenshots/chart-report.png)
--->
+<img src="docs/screenshots/demo-flow.png" alt="Demo flow: choose dataset, inspect agent steps and charts, export HTML report" width="100%" />
+
+| 数据集即刻可用 | Agent 步骤可追溯 | 报告可离线交付 |
+|---|---|---|
+| <img src="docs/screenshots/dataset-sidebar.png" alt="Dataset sidebar with demo datasets" width="100%" /> | <img src="docs/screenshots/agent-steps-chart.png" alt="Agent analysis steps and generated chart" width="100%" /> | <img src="docs/screenshots/report-export.png" alt="Generated report card with exportable HTML" width="100%" /> |
+
+**一眼能看到的产品闭环**：
+
+- **不是 Chat UI 套壳**：Agent 会展示 `inspect_data → run_analysis → create_chart → generate_report` 的完整执行轨迹。
+- **不是编答案**：二级 LLM 只负责生成 SQLite SQL，数字由 `better-sqlite3` 在 `:memory:` 数据库里真实计算。
+- **不是 demo-only**：Prisma/Postgres 持久化、Auth.js 登录、owner check、HTML 报告导出都已经接上。
 
 ---
 
