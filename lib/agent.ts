@@ -16,9 +16,18 @@ import {
   chatCompletionStream,
   type ChatCompletionMessageParam,
 } from '@/lib/llm'
-import { TOOL_DEFINITIONS, TOOL_LIST } from '@/lib/tools/definitions'
-import { executeTool, type ToolExecutionContext } from '@/lib/tools/executor'
-import type { StreamEvent, ToolName } from '@/types'
+import {
+  executeTool,
+  getToolList,
+  getToolUiDescription,
+  isToolName,
+  type ToolExecutionContext,
+} from '@/lib/tools'
+import type { StreamEvent } from '@/types'
+
+// 模块加载时 registry 已经被 lib/tools/index.ts 的 side-effect import 填充。
+// 缓存一份 tool list，避免每次 LLM 调用都重新构造数组。
+const TOOL_LIST = getToolList()
 
 const MAX_STEPS = 10
 
@@ -213,21 +222,15 @@ export async function runAgent(params: RunAgentParams): Promise<void> {
           continue
         }
 
-        // 解析 args + 提取 description（仅 run_analysis 工具的 args 带这个字段）
+        // 解析 args（失败时 executor 内部会再次校验并返回 { error }），
+        // 由 registry 决定显示给用户的进度文案（动态 / 静态）
         let parsedArgs: unknown = {}
-        let description = defaultDescription(name)
         try {
           parsedArgs = JSON.parse(toolCall.function.arguments)
-          if (
-            isPlainObject(parsedArgs) &&
-            typeof parsedArgs.description === 'string' &&
-            parsedArgs.description.length > 0
-          ) {
-            description = parsedArgs.description
-          }
         } catch {
-          // JSON 解析失败时 executor 内部会再次校验并返回 { error }
+          // ignore
         }
+        const description = getToolUiDescription(name, parsedArgs)
 
         onEvent({ type: 'tool_start', tool: name, description })
         const result = await executeTool(name, parsedArgs, ctx)
@@ -251,25 +254,3 @@ export async function runAgent(params: RunAgentParams): Promise<void> {
   }
 }
 
-// ---------- 辅助 ----------
-
-function isToolName(name: string): name is ToolName {
-  return Object.prototype.hasOwnProperty.call(TOOL_DEFINITIONS, name)
-}
-
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-}
-
-function defaultDescription(tool: ToolName): string {
-  switch (tool) {
-    case 'inspect_data':
-      return '正在读取数据结构...'
-    case 'run_analysis':
-      return '正在分析数据...'
-    case 'create_chart':
-      return '正在生成图表...'
-    case 'generate_report':
-      return '正在生成报告...'
-  }
-}

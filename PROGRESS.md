@@ -41,6 +41,15 @@
 - 注册接口 / 登录页 / Header 退出按钮
 - 5 个分析路由加 `auth()` + owner check
 
+### Phase 5（2026-05-23）— 工具系统重构
+
+**目标**：借鉴 Nous Research Hermes Agent 的自注册 registry 模式，把 4 个工具从单体 `definitions.ts` + `executor.ts` 拆成单文件、加 zod 校验，让"新增工具的边际成本"降到最低。
+
+- `lib/tools/registry.ts` 提供 `defineTool` / `executeTool` / `getToolList` / `getToolUiDescription`
+- 每个工具一个文件：`schema` / `handler` / `uiDescription` / 动态文案派生 写在一起
+- `agent.ts` 的 `defaultDescription` 工具特例派发逻辑搬到 registry 的 `uiDescriptionFrom`
+- 引入 zod（已通过 openai SDK 间接安装 ^4.4.3）做运行时校验 + args 类型推断
+
 ---
 
 ## 2. 当前进度（Phase 1）
@@ -49,9 +58,8 @@
 | ------------- | -------------------------- | ----------------------------------------------------------- |
 | 类型          | `types/index.ts`           | ✅ 完成                                                     |
 | LLM 抽象      | `lib/llm.ts`               | ✅ 完成（deepseek + openai；claude 留 throw 占位）          |
-| 工具 schema   | `lib/tools/definitions.ts` | ✅ 完成（4 个工具）                                         |
+| 工具系统      | `lib/tools/*`              | ✅ 完成（4 个工具，Phase 5 重构为自注册 registry）          |
 | 数据集存储    | `lib/dataset-store.ts`     | ✅ 完成（内存 Map）                                         |
-| 工具执行器    | `lib/tools/executor.ts`    | ✅ 完成                                                     |
 | Agent 主循环  | `lib/agent.ts`             | ✅ 完成                                                     |
 | 上传 API      | `app/api/upload/route.ts`  | ✅ 完成（已 curl 验证：上传成功 + 类型推断正确 + 错误处理） |
 | Agent SSE API | `app/api/agent/route.ts`   | ✅ 完成（已 curl 验证：参数校验 + SSE 通道 + 错误事件流）   |
@@ -75,7 +83,7 @@
 
 ### L2. `node:vm` 不是真正的安全沙箱 ✅ 已解决（2026-05-17）
 
-- ~~`lib/tools/executor.ts` 的 `runInSandbox`~~
+- ~~`lib/tools/executor.ts` 的 `runInSandbox`（已合并入 `lib/tools/run-analysis.ts`）~~
 - ~~历史上有上下文逃逸 CVE；用户输入间接通过 LLM 进入 vm~~
 - **解决方案**：换 `better-sqlite3` (SQLite 内存数据库)。LLM 生成 SQL 而不是 JS，跑在 SQLite 引擎里——SQLite 是世界上最被审计过的 DB 之一，安全性远超 vm。三层防御：(1) 必须 SELECT/WITH 开头；(2) 拒绝 DDL/DML keyword 正则；(3) 每次 `:memory:` 新建 + 用完即销毁。`next.config.ts` 加 `serverExternalPackages: ['better-sqlite3']` 处理 native binding 部署。
 
@@ -126,14 +134,14 @@
 
 ### L9. tool result 没做截断 ✅ 已解决（2026-05-15）
 
-- ~~`lib/tools/executor.ts` 所有工具的 JSON.stringify 返回~~
+- ~~`lib/tools/executor.ts` 所有工具的 JSON.stringify 返回（Phase 5 后逻辑搬到 `lib/tools/run-analysis.ts`）~~
 - ~~大数据集 run_analysis 的 data 可能很大，多轮后撑爆 LLM 上下文窗口~~
-- **解决方案**：`executor.ts:truncateForLLM`：数组超 30 项切前 30 + `_truncated` 元信息（含原长度、shown 数量、给 LLM 的 hint）；非数组 JSON 超 6000 字符（~1500 token）兜底警告。SYSTEM_PROMPT 加一条让 LLM 理解 `_truncated` 字段不要原样展示。
+- **解决方案**：`run-analysis.ts:truncateForLLM`：数组超 30 项切前 30 + `_truncated` 元信息（含原长度、shown 数量、给 LLM 的 hint）；非数组 JSON 超 6000 字符（~1500 token）兜底警告。SYSTEM_PROMPT 加一条让 LLM 理解 `_truncated` 字段不要原样展示。
 - **效果**：单 tool result 从可能 2K+ token 降到 ~500 token 级别，长对话累积 token 增长降约 70%。
 
 ### L10. 二次 LLM 调用无缓存
 
-- **位置**：`lib/tools/executor.ts` 的 `generateAnalysisCode`
+- **位置**：`lib/tools/run-analysis.ts` 的 `generateAnalysisSQL`
 - **影响**：相同 intent + dataset 每次都重新生成代码，浪费 token。
 - **解决**：Phase 2 用 `(datasetId, intent)` 做 LRU 缓存。
 
@@ -177,6 +185,7 @@
 
 ### 4.4 工程
 
+- [x] ✅ 工具系统重构：自注册 registry + zod 校验（Phase 5，借鉴 Hermes Agent）
 - [ ] 工具单测（`__tests__/tools/`）
 - [ ] CSV/Excel 解析的边界用例测试
 - [ ] 添加 ESLint 规则禁止 `any`、强制 explicit return type

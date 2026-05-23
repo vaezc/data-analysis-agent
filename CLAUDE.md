@@ -247,7 +247,17 @@ while (未结束 && steps < MAX_STEPS):
 
 ## 工具定义（4 个）
 
-放在 `lib/tools/definitions.ts`，OpenAI 函数调用格式。
+**自注册 registry 模式**（借鉴 Hermes Agent）：每个工具一个文件，用 `defineTool({...})` 在 import 时自注册到 `lib/tools/registry.ts` 的中心表。`agent.ts` 只通过 `getToolList()` / `executeTool()` / `getToolUiDescription()` 与工具交互，不关心具体种类。
+
+每个工具文件同时包含：
+- `description`：给 LLM 看的 schema description（决定何时调用）
+- `uiDescription`：给前端看的默认中文进度文案（"正在..."）
+- `parameters`：OpenAI function calling 的 JSON Schema（手写，保留 LLM 提示词调优）
+- `schema`：zod schema，负责运行时校验 + `run()` 函数里的 args 类型推断
+- `uiDescriptionFrom`（可选）：从已校验的 args 派生动态进度文案（如 `run_analysis` 用 `args.description`）
+- `run`：执行函数，errors 抛出即可，registry 统一兜成 `{ error: ... }` JSON 喂回 LLM
+
+新增工具流程：在 `lib/tools/` 加新文件 → 在 `lib/tools/index.ts` 加一行 `import './xxx'` → 在 `types/index.ts` 的 `ToolName` 联合加一项。
 
 ### 1. `inspect_data`
 查看数据集结构。**Agent 必须在任何分析前先调用这个。**
@@ -298,8 +308,13 @@ data-agent/
 │   ├── agent.ts                  # Agent 主循环
 │   ├── dataset-store.ts          # 数据集存储（内存 → Supabase）
 │   └── tools/
-│       ├── definitions.ts        # Tool schema
-│       └── executor.ts           # Tool 执行逻辑
+│       ├── registry.ts           # defineTool + executeTool + getToolList + getToolUiDescription
+│       ├── index.ts              # 副作用 import 触发各工具自注册 + re-export registry API
+│       ├── inspect-data.ts       # 工具 1（schema + handler + UI 描述写一起）
+│       ├── run-analysis.ts       # 工具 2（含 uiDescriptionFrom 动态文案）
+│       ├── create-chart.ts       # 工具 3
+│       ├── generate-report.ts    # 工具 4
+│       └── sqlite-runner.ts      # better-sqlite3 :memory: SQL 沙箱（helper）
 ├── hooks/
 │   └── use-agent.ts              # 消费 SSE 流的 React Hook
 └── types/
@@ -431,8 +446,7 @@ LLM 生成最终回答
 
 已完成：
 - [x] `lib/llm.ts` DeepSeek 接入
-- [x] `lib/tools/definitions.ts` 4 个工具定义
-- [x] `lib/tools/executor.ts` 工具执行（最终 SQL 跑 better-sqlite3 :memory:）
+- [x] `lib/tools/` 4 个工具（Phase 5 重构为自注册 registry：每个工具一个文件 + zod 校验）
 - [x] `lib/agent.ts` 主循环 + SSE 推送
 - [x] 数据集存储（Phase 4 迁到 Prisma：`lib/db/datasets.ts`）
 - [x] `app/api/upload/route.ts` CSV/Excel 解析
@@ -451,7 +465,7 @@ curl -F "file=@sales.csv" http://localhost:3000/api/upload
 ```
 
 ### Phase 2（Week 2）— 完整 Agent 体验
-- [ ] E2B 沙箱接入（替换 executor.ts 中的内置计算）
+- [ ] E2B 沙箱接入（替换 `run-analysis.ts` 当前的 SQLite 路径）
 - [ ] Recharts 图表渲染
 - [ ] 多轮对话上下文保持
 - [ ] Agent 步骤折叠展开的 UI 打磨
@@ -470,6 +484,13 @@ curl -F "file=@sales.csv" http://localhost:3000/api/upload
 - [x] `/api/auth/register` 注册接口
 - [x] 6 个分析路由加 `auth()` + owner check（数据层强制传 userId，编译期防漏）
 - [x] 登录 / 注册页面 + Header UserMenu（用户邮箱 + 退出按钮）
+
+### Phase 5（2026-05）— 工具系统重构 ✅
+- [x] `lib/tools/` 拆分：单体 `definitions.ts` + `executor.ts` → 自注册 registry + 4 个单工具文件
+- [x] `lib/tools/registry.ts`：`defineTool()` / `executeTool()` / `getToolList()` / `getToolUiDescription()`
+- [x] 引入 zod（已通过 openai SDK 间接安装，^4.4.3）做运行时校验 + args 类型推断，消除 `asObject` / `asString` 模板
+- [x] `agent.ts` 的 `defaultDescription` 工具特例派发逻辑搬到 registry 的 `uiDescriptionFrom`
+- [x] 灵感：Nous Research Hermes Agent 的 tool registry 模式
 
 ---
 
@@ -490,12 +511,12 @@ curl -F "file=@sales.csv" http://localhost:3000/api/upload
 
 > 在开始编码前，请确认你已经阅读到这里。每次新会话先回复："已阅读 CLAUDE.md，当前处于 Phase X，下一步任务是 YYY"，等我确认后再动手。
 
-**当前状态：** Phase 4（鉴权改造）✅ **全部完成**（S1–S10）
+**当前状态：** Phase 5（工具系统重构）✅ **完成**
 
-**Phase 4 交付物**：Prisma 全栈迁移 + Auth.js v5 邮箱密码登录 + 多租户 owner check + 登录/注册/Header UI。完整 14 项 e2e 验收通过。
+**Phase 5 交付物**：`lib/tools/` 重构为自注册 registry —— 每个工具单文件（schema + handler + UI 描述一处写齐），zod 接管参数校验，`agent.ts` 不再做工具特例派发。`next build` + `tsc --noEmit` + `eslint` 全过。
 
 **下一步候选**（按优先级，等用户拍板）：
-- Phase 5: Prisma 6 → 7 升级（独立立项，详见 PROGRESS.md §6.6 草案）
+- Prisma 6 → 7 升级（独立立项，详见 PROGRESS.md §6.6 草案）
 - 注册时发邮件验证（防 typo / 防爬虫）
 - OAuth provider（Google / GitHub）
 - 邮箱失败 rate limit（防暴力破解）

@@ -231,8 +231,12 @@ data-analysis-agent/
 │   │   └── rate-limit.ts                 # 登录失败 rate limit
 │   ├── suggestions.ts                    # LLM 生成自然中文提问建议
 │   └── tools/
-│       ├── definitions.ts                # 工具 schema（给 LLM 看）
-│       ├── executor.ts                   # 工具执行 + 截断
+│       ├── registry.ts                   # ★ 自注册中心：defineTool + executeTool + getToolList
+│       ├── index.ts                      # 副作用 import 触发各工具自注册 + re-export
+│       ├── inspect-data.ts               # 工具 1：schema + handler + UI 描述同文件
+│       ├── run-analysis.ts               # 工具 2：含 uiDescriptionFrom 动态文案 + 截断
+│       ├── create-chart.ts               # 工具 3：zod superRefine 兜 pie / 长度校验
+│       ├── generate-report.ts            # 工具 4
 │       └── sqlite-runner.ts              # ★ better-sqlite3 SQL 沙箱
 ├── prisma/
 │   ├── schema.prisma                     # 6 表 schema
@@ -259,7 +263,8 @@ data-analysis-agent/
 |---|---|
 | **Agent 主循环 + 三种 delta 累积** | [`lib/agent.ts`](./lib/agent.ts) |
 | **SSE 流式协议 + UTF-8 安全** | [`hooks/use-agent.ts`](./hooks/use-agent.ts) |
-| **Tool result 截断（控 token）** | [`lib/tools/executor.ts`](./lib/tools/executor.ts) |
+| **工具自注册 registry（借鉴 Hermes Agent）** | [`lib/tools/registry.ts`](./lib/tools/registry.ts) |
+| **Tool result 截断（控 token）** | [`lib/tools/run-analysis.ts`](./lib/tools/run-analysis.ts) |
 | **HTML 报告内嵌 SVG 图表** | [`components/chat/ReportCard.tsx`](./components/chat/ReportCard.tsx) |
 | **Sticky-to-bottom 滚动** | [`components/chat/ChatPanel.tsx`](./components/chat/ChatPanel.tsx) |
 | **Prisma 数据访问层 + owner check** | [`lib/db/datasets.ts`](./lib/db/datasets.ts) · [`lib/db/messages.ts`](./lib/db/messages.ts) |
@@ -288,6 +293,7 @@ data-analysis-agent/
   - Demo 数据集 + 一键试用按钮
   - LLM 生成的动态提问建议
 - [x] **Vision 多模态架构** — 后端协议层 ready，前端 UI 待 vision-capable LLM 启用
+- [x] **工具系统重构** — 自注册 registry（借鉴 Nous Research Hermes Agent）+ zod 校验，新增工具只需 1 个文件
 - [ ] **E2B 沙箱** — 替代 better-sqlite3 跑真 Python（需付费 API key）
 - [ ] **二次 LLM 调用缓存** — 同 intent 复用，省 token
 - [ ] **多 Excel sheet 支持** — 当前只读第一个

@@ -29,7 +29,8 @@
     "recharts": "^3.8.1",
     "remark-gfm": "^4.0.1",
     "resend": "^6.12.3",
-    "undici": "^7.25.0"
+    "undici": "^7.25.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
