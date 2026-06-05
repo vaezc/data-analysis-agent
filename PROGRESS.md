@@ -373,12 +373,8 @@
 
 ### 6.6 待选优化（Phase 5+ 候选）
 
-- **Prisma 6 → 7 升级**（独立立项，[InfoQ 报道](https://www.infoq.com/news/2026/01/prisma-7-performance/)）：
-  - v7 架构重写：Rust binary → WASM + driver adapter
-  - 包体积 14 MB → 1.6 MB（减 85%），findMany 25k 行 3.4× 加速
-  - 我们能直接获得：L14（Turbopack + Prisma binary）问题消失 + cold start 更快
-  - 强制要改：schema provider 改 `prisma-client` / package.json `"type": "module"` / 装 `@prisma/adapter-pg` / 连接池 v7 默认值重新校准
-  - 时机：等 Phase 4 完全稳定后单独立项升，不混在已完成的数据层迁移里
+- ~~**Prisma 6 → 7 升级**~~ ✅ 2026-06 完成（详见 §8）。实际改动比预估多两项：
+  连接 URL 移出 schema 到 `prisma.config.ts`、`directUrl` 被并入单一 `url` 概念、Node ≥20.19 硬门槛
 - ~~注册时发邮件验证~~ ✅ Phase 6 完成（详见 §7.2）
 - ~~OAuth provider（Google / GitHub）~~ ✅ Phase 6 完成（详见 §7.3）
 - ~~登录失败 rate limit~~ ✅ Phase 6 完成（详见 §7.1，DB 实现，不走 Vercel KV）
@@ -466,3 +462,45 @@
 - [x] README.md：核心特性「生产级鉴权」+ 鉴权技术栈表（三 provider + 邮箱验证 + rate limit）
 - [ ] LEARNING.md：Phase 6 三件事的踩坑 / 设计取舍（后续单独立项）
 - [ ] INTERVIEW.md：rate limit / email verification / OAuth 的 STAR 故事（后续单独立项）
+
+---
+
+## 8. Prisma 6 → 7 升级（2026-06-05）
+
+> v7 把 Rust query engine 换成 driver adapter 架构（包体减 ~85%、cold start 更快、L14 Turbopack binary 问题消失）。独立分支 `chore/prisma-7-upgrade`，CI 安全网下进行。
+
+### 8.1 实际破坏性变更（比立项预估多）
+
+| 变更 | v6 | v7 |
+|---|---|---|
+| generator | `prisma-client-js`，输出进 node_modules | `prisma-client` + 必填 `output`，输出到 `lib/generated/prisma`（gitignore） |
+| 运行时引擎 | Rust binary | `@prisma/adapter-pg`（node-postgres），无 binary |
+| 连接 URL | schema 的 `datasource.url` / `directUrl` | **移出 schema**：运行时连接在 `lib/prisma.ts` 的 adapter；CLI/migration 连接在根目录 `prisma.config.ts` |
+| `directUrl` | 独立字段 | 概念并入单一 `url`；本项目仍需直连迁移，故 `prisma.config.ts.datasource.url = env('DIRECT_URL')` |
+| 模块格式 | CJS | ESM（package.json `"type":"module"`） |
+| client import | `@prisma/client` | `@/lib/generated/prisma/client` |
+| Node | 18+ | **≥20.19 硬门槛**（preinstall 拒装低版本） |
+
+### 8.2 改动清单
+
+- `package.json`：`"type":"module"` + `engines.node>=20.19` + prisma/@prisma/client 升 7 + 装 `@prisma/adapter-pg`/`pg`/`@types/pg`
+- `prisma/schema.prisma`：generator 改 `prisma-client`+`output`；datasource 只留 `provider`
+- `prisma.config.ts`（新）：CLI/migration 连接（DIRECT_URL）+ `import 'dotenv/config'`
+- `lib/prisma.ts`：从 generated 路径 import + `new PrismaPg({connectionString: DATABASE_URL})`，保留 HMR 单例
+- `next.config.ts`：external 去 `@prisma/engines`，加 `@prisma/adapter-pg`/`pg`
+- `vitest.config.ts`：`__dirname` → `import.meta.dirname`（ESM）
+- `.nvmrc`（新，=20）+ CI 改用 `node-version-file`
+- `.gitignore`：忽略 `/lib/generated/`
+
+### 8.3 验证（全绿）
+
+- `prisma migrate status`：5 migration 全在，schema up to date（CLI 走 prisma.config.ts + DIRECT_URL）
+- 运行时冒烟：PrismaPg adapter 走 Supavisor 事务池（6543）真实查询 `user.count` / `dataset.findMany`（JSONB+关系）/ 重复查询无 prepared statement 报错 —— **事务池兼容性确认 OK**
+- `tsc --noEmit` / `eslint` / `vitest`（33）/ `next build`（17 路由）全过
+
+### 8.4 文档同步
+
+- [x] CLAUDE.md：数据层加 Prisma 7 专节（Node 门槛 / URL 移位 / generated 路径 / external 列表）
+- [x] DEPLOY.md：§4 补 Node ≥20.19 + prisma.config.ts 说明
+- [x] PROGRESS.md：本节
+- [x] README.md：技术栈表

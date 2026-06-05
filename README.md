@@ -95,7 +95,7 @@ Agent:   [Database]    正在读取数据结构...         ✓
 | 语言 | **TypeScript strict** | 类型在 SSE / tool / LLM 协议间流转，必须 strict |
 | LLM | **DeepSeek V4** (OpenAI 兼容) | 中文好、价格低、支持 Tool Use 与 thinking mode |
 | 流式 | **原生 SSE + ReadableStream** | 单向流足够；WebSocket 是双向通信，本场景过度设计 |
-| 持久化 | **Prisma + Postgres**（Supabase 仅作宿主） | users / accounts / datasets / messages 等 6 表；5 次 migration 进 git 可追溯 |
+| 持久化 | **Prisma 7 + Postgres**（Supabase 仅作宿主） | driver adapter 架构（`@prisma/adapter-pg`，无 Rust binary）；6 表、5 次 migration 进 git；连接配置在 `prisma.config.ts` |
 | 鉴权 | **Auth.js v5** + bcryptjs + Resend | Credentials / Google / GitHub 三 provider + JWT + 邮箱验证 + 登录 rate limit + `proxy.ts` 路由保护 |
 | 图表 | **Recharts** | React 原生 + SVG 输出（可抓取嵌入报告） |
 | 样式 | **Tailwind v4** + CSS variables | `@theme inline` 让 token 体系天然落地 |

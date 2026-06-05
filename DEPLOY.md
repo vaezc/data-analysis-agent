@@ -95,6 +95,11 @@ Google 单个 OAuth App **支持多个 Authorized redirect URIs**：
 
 ## 4. 数据库 schema 同步
 
+> **Prisma 7（2026-06 升级）前置**：需 **Node ≥ 20.19**（`.nvmrc` 锁 20、`engines.node` 写明）。
+> Vercel 的 Node 20.x / 22.x 均满足；本地用 `nvm use` 跟随 `.nvmrc`。
+> 连接 URL 已移出 schema：运行时（DATABASE_URL/6543）走 `lib/prisma.ts` 的 driver adapter，
+> CLI/migration（DIRECT_URL/5432）配在根目录 `prisma.config.ts`。两个 URL 仍都要进 Vercel env。
+
 > **重要变更（2026-06）**：migration **不再**在 Vercel build 里跑。
 > 原 `build` 是 `prisma generate && prisma migrate deploy && next build`，
 > 把每次部署绑死在「构建时数据库必须可达」上 —— Supabase 免费层闲置 7 天自动暂停后，

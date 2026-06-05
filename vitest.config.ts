@@ -1,12 +1,11 @@
 import { defineConfig } from 'vitest/config'
-import path from 'node:path'
 
-// 手写 `@` alias 对齐 tsconfig 的 paths（@/* → ./*）。
-// 不用 vite-tsconfig-paths 插件：它是 ESM-only，在本项目（无 "type":"module"）
-// 的 CJS 配置加载链路下会触发 ERR_REQUIRE_ESM（Node < 20.19）。手写零依赖更稳。
+// 手写 `@` alias 对齐 tsconfig 的 paths（@/* → ./*），零额外依赖。
+// 项目为 ESM（package.json "type":"module"），用 import.meta.dirname 取目录，
+// 不能用 CJS 的 __dirname。
 export default defineConfig({
   resolve: {
-    alias: { '@': path.resolve(__dirname, '.') },
+    alias: { '@': import.meta.dirname },
   },
   test: {
     environment: 'node',

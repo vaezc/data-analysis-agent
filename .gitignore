@@ -49,3 +49,7 @@ next-env.d.ts
 # Claude Code 个人配置（含本机路径、个人权限白名单），不公开
 # 项目共享的 .claude/settings.json 应 commit;此文件按 .local 约定本地保留
 .claude/settings.local.json
+
+# Prisma 7 生成的 client（ESM，输出到项目目录）。
+# 不进 git：每次 install/build 由 `prisma generate` 重新生成（CI 与 Vercel build 均已含）。
+/lib/generated/

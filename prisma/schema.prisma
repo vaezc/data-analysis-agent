@@ -20,13 +20,16 @@
 // ============================================================
 
 generator client {
-  provider = "prisma-client-js"
+  // Prisma 7：新 generator，输出 ESM client 到项目目录（不再进 node_modules）。
+  // 运行时走 driver adapter（@prisma/adapter-pg），无 Rust binary。
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL") // Supavisor pooler（6543）—— 应用运行时
-  directUrl = env("DIRECT_URL") // 直连（5432）—— 仅 migration 用
+  // Prisma 7：连接 URL 不再写在 schema，移到 prisma.config.ts（CLI/migration 用）。
+  // 运行时连接由 lib/prisma.ts 的 driver adapter 提供，二者解耦。
+  provider = "postgresql"
 }
 
 model User {

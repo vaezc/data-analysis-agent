@@ -213,11 +213,15 @@ DIRECT_URL    # 端口 5432（直连），仅 migration 用
 
 **密码含特殊字符必须 URL 编码**：`@` → `%40`，`]` → `%5D`，等等。
 
-**Turbopack 必须把 Prisma 标为 external**（否则连接错误）：
+**Prisma 7（driver adapter 架构，2026-06 升级）关键点：**
+- **Node ≥ 20.19**（`.nvmrc` 锁 20、`engines.node` 写明）。Prisma 7 preinstall 在低版本直接拒装。
+- **连接 URL 不在 schema**：`schema.prisma` 的 datasource 只剩 `provider`。运行时连接（DATABASE_URL/6543）由 `lib/prisma.ts` 的 `@prisma/adapter-pg` 提供；CLI/migration 的连接（DIRECT_URL/5432）配在根目录 **`prisma.config.ts`**（需 `import 'dotenv/config'` 显式加载 .env）。
+- **client 生成到项目目录**：generator `prisma-client` 输出到 `lib/generated/prisma`（已 gitignore，install/build 由 `prisma generate` 重生成）。import 走 `@/lib/generated/prisma/client`，不再是 `@prisma/client`。
+- **无 Rust engine**：`@prisma/engines` 已移除。Turbopack external 列表相应改为：
 
 ```ts
-// next.config.ts
-serverExternalPackages: ['better-sqlite3', '@prisma/client', '@prisma/engines']
+// next.config.ts —— 含 native binding / 运行时 driver 的包标 external
+serverExternalPackages: ['better-sqlite3', '@prisma/client', '@prisma/adapter-pg', 'pg', 'undici']
 ```
 
 ---
