@@ -118,17 +118,59 @@ npx prisma studio                            # 本地 GUI 看数据
 | 文件 | 用途 | 能 import 什么 |
 |---|---|---|
 | `auth.config.ts` | 给 `proxy.ts` 引入的 edge-safe 部分 | 仅类型 + callbacks，**不能 import Prisma / bcrypt** |
-| `auth.ts` | 完整配置（Credentials provider + Prisma） | 任意（只在 server side 使用） |
+| `auth.ts` | 完整配置（Credentials + OAuth + Prisma） | 任意（只在 server side 使用） |
 | `proxy.ts` | 路由保护入口 | **只 import `auth.config.ts`** —— 引入 `auth.ts` 会让 Prisma 走 edge runtime 报错 |
 
 **关键设计：**
 - `session.strategy = 'jwt'`：无状态，适配 Vercel Serverless（DB session 每次请求多一次 SELECT）
+- `PrismaAdapter + JWT` 共用：Adapter 管 OAuth 用户/Account 持久化，session 仍走 JWT（无 Session 表）
 - `bcrypt cost factor = 12`：单次 hash ~250ms，被验证够安全
 - 邮箱**统一小写存储**：避免 `Foo@x.com` / `foo@x.com` 注册两个账号
 - `proxy.ts` 的 matcher 必须排除 `/api/auth/*` 和 `/api/auth/register`，否则注册接口自己被拦
 - 已登录访问 `/login` `/register` 自动重定向 `/`；未登录访问其他页面跳 `/login`
 
 **JWT callback 必须把 `user.id` 写进 token**，session callback 再暴露给 `session.user.id`——默认 next-auth session 里没有 `id`。
+
+### Provider 矩阵
+
+| Provider | 文件 | 关键点 |
+|---|---|---|
+| Credentials | `auth.ts` `authorize()` | bcrypt 校验 + rate limit 前置 + 邮箱验证后置 |
+| Google | `auth.ts` providers | `allowDangerousEmailAccountLinking: true`（OAuth 邮箱与本地账号自动 link，Option A 风险已接受） |
+| GitHub | 同上 | 同上 |
+
+`authorize()` 的执行顺序（**改顺序前先想清楚**）：
+
+1. **Rate limit 检查** → `checkLoginRateLimit(email)`，超限抛 `RateLimitError`（code='RateLimit'）。放第一位是为了不让暴力破解烧 bcrypt CPU。
+2. **bcrypt 校验** → 不存在的 user / OAuth-only 用户 / 密码错都走 `recordFailedAttempt(email)` + `return null`（防 email enumeration —— 三种失败外部看起来一样）。
+3. **邮箱验证状态** → `!user.emailVerified` 抛 `EmailNotVerifiedError`（code='EmailNotVerified'）。放在密码校验**之后**，避免攻击者用错密码探测"这邮箱是否存在且未验证"。
+4. **成功** → `clearFailedAttempts(email)` 清历史，返回 `{ id, email, name }`。
+
+### 邮箱验证（`lib/auth/email.ts` + Resend）
+
+- **Token**：`crypto.randomBytes(32).toString('base64url')`，43 字符，24h 过期
+- **存储**：明文存 DB（生产建议存 SHA-256 hash，demo 简化）
+- **一次性**：验证成功在同一事务里 `user.emailVerified = now()` + `delete token`
+- **重发节流**：60s 内同一 userId 不允许重发，返回剩余等待秒数
+- **发件人**：`onboarding@resend.dev`（Resend sandbox，**只能发到注册邮箱**），生产换 verified domain
+- **失败不阻塞注册**：注册接口 await 邮件发送，把 `verificationEmailSent` 状态回给前端，用户可在登录页点"重发"
+- **enumeration 防御**：`/api/auth/resend-verification` 对不存在的邮箱也返回 200
+
+### 登录失败 rate limit（`lib/auth/rate-limit.ts`）
+
+- **算法**：滑动窗口 —— 15 分钟内累计 5 次失败触发锁定，直到最早那次出窗口
+- **key 是 email 不是 IP**：IP 跨用户共享（公司 NAT、CGNAT）不靠谱；email 是攻击目标本身
+- **不存在的 email 也记**：防 email enumeration（攻击者通过响应快慢分辨邮箱存在性）
+- **登录成功清历史**：`clearFailedAttempts(email)` `deleteMany`，老失败不留尾巴
+- **DB 累积清理**：当前无自动清，每条 ~100 字节，1 万条 ~1 MB。生产可加 Vercel cron 每天 `DELETE WHERE created_at < NOW() - INTERVAL '7 days'`
+
+### OAuth（Google + GitHub）
+
+- **新增表** `accounts`：next-auth 标准 schema，**字段名故意 snake_case**（`access_token` / `expires_at` 等），PrismaAdapter 直接按这些字段写，不可改 camelCase
+- **`User.password` 可空**：OAuth 用户没设过密码；`authorize()` 里 `!user.password → return null`（外部看起来跟"密码错"一样，防 enumeration "这账号是 OAuth-only"）
+- **`allowDangerousEmailAccountLinking: true`**：若 Google 邮箱已被本地账号占用，自动 link 到同一 User。风险：攻击者控制 Google 账号即能登本地账号；对 demo 可接受
+- **回调 URL**：Google `<AUTH_URL>/api/auth/callback/google`，GitHub `<AUTH_URL>/api/auth/callback/github`
+- **环境变量**（未配置就不启用）：`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`
 
 ---
 
@@ -142,17 +184,25 @@ lib/
 ├── db/
 │   ├── datasets.ts    # createDataset / getDataset / listDatasets / deleteDataset
 │   └── messages.ts    # loadConversation / saveUserMessage / saveAssistantMessage / deleteMessagePair
+└── auth/
+    ├── email.ts       # sendVerificationEmail / verifyEmailToken（Resend）
+    └── rate-limit.ts  # checkLoginRateLimit / recordFailedAttempt / clearFailedAttempts
 ```
 
 **Schema 关键：**
-- 表名 snake_case（`@@map`），字段 camelCase
+- 6 张表：`users` / `accounts` / `datasets` / `messages` / `login_attempts` / `email_verification_tokens`
+- 表名 snake_case（`@@map`），字段 camelCase（**`accounts` 表故意保留 snake_case** —— next-auth 协议要求）
 - `columns` / `rows` / `ui` / `llm` 用 `Json`（→ Postgres JSONB）
-- 三条级联：`User → Dataset → Message` 全 `onDelete: Cascade`
+- 级联：`User → Dataset → Message` 全 `onDelete: Cascade`；`User → Account` / `User → EmailVerificationToken` 同样级联
+- `LoginAttempt` **不外键到 User**：要对不存在的 email 也记账（防 enumeration）
 - 列出 datasets 时用 **`jsonb_array_length(rows)` O(1)** 算 rowCount，避免拉全量
 
-**Migration 演进（两条都进 git）：**
-1. `20260519_init` —— Dataset + Message
-2. `20260520_add_user_and_owner` —— User + Dataset.userId 外键
+**Migration 演进（5 条全部入 git，按时间顺序）：**
+1. `20260519145908_init` —— Dataset + Message
+2. `20260520013006_add_user_and_owner` —— User + Dataset.userId 外键
+3. `20260520064951_add_login_attempts` —— LoginAttempt 表（rate limit 用）
+4. `20260520091850_add_email_verification` —— User.emailVerified + EmailVerificationToken
+5. `20260520110805_add_oauth_accounts` —— User.password 改可空 + image 字段 + Account 表（OAuth）
 
 **连接字符串（`.env`，不在 `.env.local`！Prisma CLI 只读 `.env`）：**
 
@@ -289,36 +339,49 @@ while (未结束 && steps < MAX_STEPS):
 data-agent/
 ├── app/
 │   ├── api/
-│   │   ├── agent/route.ts       # SSE 流式 Agent
-│   │   ├── upload/route.ts      # 文件上传解析
-│   │   └── dataset/[id]/route.ts # 查询数据集元信息
-│   ├── page.tsx                  # 主对话界面
+│   │   ├── agent/route.ts                    # SSE 流式 Agent
+│   │   ├── upload/route.ts                   # 文件上传解析
+│   │   ├── datasets/...                      # 数据集 CRUD
+│   │   ├── messages/[id]/route.ts            # 消息配对删除
+│   │   └── auth/
+│   │       ├── [...nextauth]/route.ts        # Auth.js handlers
+│   │       ├── register/route.ts             # 邮箱密码注册 + 触发验证邮件
+│   │       ├── verify-email/route.ts         # 消费验证 token
+│   │       └── resend-verification/route.ts  # 重发验证邮件（60s 节流）
+│   ├── login/page.tsx                        # Credentials + Google + GitHub 入口
+│   ├── register/page.tsx                     # 注册表单
+│   ├── verify-email/page.tsx                 # 客户端读 ?token → POST verify-email
+│   ├── page.tsx                              # 主对话界面
 │   └── layout.tsx
 ├── components/
-│   ├── chat/
-│   │   ├── ChatPanel.tsx         # 消息列表 + 输入框
-│   │   ├── MessageBubble.tsx     # 单条消息
-│   │   ├── AgentStep.tsx         # Agent 步骤进度（运行中/完成）
-│   │   └── ChartRenderer.tsx     # 图表渲染
-│   ├── upload/
-│   │   └── FileUploader.tsx      # 拖拽上传 + 预览
-│   └── ui/                       # 基础组件（Button/Input 等，自己写）
+│   ├── chat/                                 # 消息 / 步骤 / 图表 / 报告
+│   ├── upload/FileUploader.tsx
+│   ├── auth/UserMenu.tsx                     # sidebar 底部头像 + 退出
+│   └── ui/                                   # 基础组件，自己写
 ├── lib/
-│   ├── llm.ts                    # LLM provider 抽象
-│   ├── agent.ts                  # Agent 主循环
-│   ├── dataset-store.ts          # 数据集存储（内存 → Supabase）
+│   ├── llm.ts                                # LLM provider 抽象
+│   ├── agent.ts                              # Agent 主循环
+│   ├── prisma.ts                             # PrismaClient 单例
+│   ├── suggestions.ts                        # LLM 生成动态 suggestions
+│   ├── db/
+│   │   ├── datasets.ts
+│   │   └── messages.ts
+│   ├── auth/
+│   │   ├── email.ts                          # Resend 邮箱验证发送 + token 校验
+│   │   └── rate-limit.ts                     # 登录失败滑动窗口
 │   └── tools/
-│       ├── registry.ts           # defineTool + executeTool + getToolList + getToolUiDescription
-│       ├── index.ts              # 副作用 import 触发各工具自注册 + re-export registry API
-│       ├── inspect-data.ts       # 工具 1（schema + handler + UI 描述写一起）
-│       ├── run-analysis.ts       # 工具 2（含 uiDescriptionFrom 动态文案）
-│       ├── create-chart.ts       # 工具 3
-│       ├── generate-report.ts    # 工具 4
-│       └── sqlite-runner.ts      # better-sqlite3 :memory: SQL 沙箱（helper）
-├── hooks/
-│   └── use-agent.ts              # 消费 SSE 流的 React Hook
-└── types/
-    └── index.ts                  # 全局类型定义
+│       ├── registry.ts                       # defineTool + executeTool + getToolList + getToolUiDescription
+│       ├── index.ts                          # 副作用 import 触发各工具自注册 + re-export
+│       ├── inspect-data.ts                   # 工具 1
+│       ├── run-analysis.ts                   # 工具 2（含 uiDescriptionFrom 动态文案）
+│       ├── create-chart.ts                   # 工具 3
+│       ├── generate-report.ts                # 工具 4
+│       └── sqlite-runner.ts                  # better-sqlite3 :memory: SQL 沙箱
+├── auth.ts                                   # 完整 NextAuth 配置（Prisma + bcrypt）
+├── auth.config.ts                            # edge-safe 配置（给 proxy.ts 用）
+├── proxy.ts                                  # 路由保护（原 middleware.ts，Next.js 16 改名）
+├── hooks/use-agent.ts                        # 消费 SSE 流
+└── types/index.ts                            # 全局类型定义
 ```
 
 **文件命名规范：**
@@ -492,6 +555,14 @@ curl -F "file=@sales.csv" http://localhost:3000/api/upload
 - [x] `agent.ts` 的 `defaultDescription` 工具特例派发逻辑搬到 registry 的 `uiDescriptionFrom`
 - [x] 灵感：Nous Research Hermes Agent 的 tool registry 模式
 
+### Phase 6（2026-05-20）— 鉴权完整化 ✅
+> 三件事一并落地（同一 day，三条 migration），都建在 Phase 4 的 Auth.js 骨架上。
+- [x] **登录失败 rate limit**：`LoginAttempt` 表 + 滑动窗口（15min / 5 次）；放在 bcrypt 校验**前**，防止暴力破解烧 CPU
+- [x] **邮箱验证**：Resend 接入 + `EmailVerificationToken` 表 + 24h TTL + 一次性消费 + 60s 重发节流 + `/verify-email` 页面
+- [x] **OAuth (Google + GitHub)**：`Account` 表（snake_case 字段，PrismaAdapter 协议）+ `User.password` 改可空 + `allowDangerousEmailAccountLinking`（Option A）
+- [x] `authorize()` 顺序固化：rate limit → bcrypt → emailVerified（避免 enumeration / 不烧 CPU）
+- [x] 三种错误抛 `CredentialsSignin` 子类（`RateLimitError` / `EmailNotVerifiedError`），code 透传前端定制文案
+
 ---
 
 ## 给 Claude Code 的明确指令
@@ -511,12 +582,19 @@ curl -F "file=@sales.csv" http://localhost:3000/api/upload
 
 > 在开始编码前，请确认你已经阅读到这里。每次新会话先回复："已阅读 CLAUDE.md，当前处于 Phase X，下一步任务是 YYY"，等我确认后再动手。
 
-**当前状态：** Phase 5（工具系统重构）✅ **完成**
+**当前状态：** Phase 6（鉴权完整化）✅ **完成**
 
-**Phase 5 交付物**：`lib/tools/` 重构为自注册 registry —— 每个工具单文件（schema + handler + UI 描述一处写齐），zod 接管参数校验，`agent.ts` 不再做工具特例派发。`next build` + `tsc --noEmit` + `eslint` 全过。
+**已落地的 Phase 列表：**
+- Phase 1 核心链路 ✅
+- Phase 2 完整 Agent 体验 ✅（E2B 沙箱搁置，better-sqlite3 替代）
+- Phase 3 生产可用（Supabase + Vercel + 报告导出 + demo 数据集）✅
+- Phase 4 用户鉴权 + Prisma 全栈迁移 ✅
+- Phase 5 工具系统重构（自注册 registry + zod）✅
+- Phase 6 鉴权完整化（rate limit + 邮箱验证 + OAuth）✅
 
 **下一步候选**（按优先级，等用户拍板）：
-- Prisma 6 → 7 升级（独立立项，详见 PROGRESS.md §6.6 草案）
-- 注册时发邮件验证（防 typo / 防爬虫）
-- OAuth provider（Google / GitHub）
-- 邮箱失败 rate limit（防暴力破解）
+- **Prisma 6 → 7 升级**（独立立项，详见 PROGRESS.md §6.6）—— 唯一真正的"未做"项
+- E2B 沙箱（需付费 API key，长期搁置）
+- 工具单测 / CI（GitHub Actions：tsc + lint + test）
+- 可观测性：tool 耗时 / token 数 / 失败率监控
+- 二次 LLM 调用结果缓存（同 intent + dataset 复用，省 token）

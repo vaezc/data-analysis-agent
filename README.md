@@ -74,7 +74,7 @@ Agent:   [Database]    正在读取数据结构...         ✓
 - 🧠 **支持 DeepSeek V4 thinking mode** — `reasoning_content` 字段按协议回 echo
 - 🗃️ **真 SQL 执行** — LLM 生成 SQLite SQL → better-sqlite3 `:memory:` 执行，支持 GROUP BY / 窗口函数 / CTE
 - 💾 **Prisma + Postgres 持久化** — users / accounts / datasets / messages 等 6 表，5 次 migration 进 git，刷新不丢数据
-- 🔐 **邮箱密码登录** — Auth.js v5 + bcrypt(12) + JWT session，`proxy.ts` 路由级保护、owner 校验防越权
+- 🔐 **生产级鉴权** — Auth.js v5 + bcrypt(12) + JWT；Credentials / Google / GitHub 三 provider；邮箱验证 + 登录失败滑动窗口（15min/5 次）+ enumeration 防御；`proxy.ts` 路由级保护、owner 校验防越权
 - 📊 **4 种图表类型** — bar / line / pie / scatter，基于 Recharts，主题色自动跟随
 - 📄 **HTML 报告导出** — 内嵌 SVG 图表，离线可双击打开，无外部依赖
 - 🌗 **明 / 暗主题** — 14 个语义化 CSS 变量，组件零硬编码颜色
@@ -96,7 +96,7 @@ Agent:   [Database]    正在读取数据结构...         ✓
 | LLM | **DeepSeek V4** (OpenAI 兼容) | 中文好、价格低、支持 Tool Use 与 thinking mode |
 | 流式 | **原生 SSE + ReadableStream** | 单向流足够；WebSocket 是双向通信，本场景过度设计 |
 | 持久化 | **Prisma + Postgres**（Supabase 仅作宿主） | users / accounts / datasets / messages 等 6 表；5 次 migration 进 git 可追溯 |
-| 鉴权 | **Auth.js v5** + bcryptjs | Credentials provider + JWT session + `proxy.ts` 路由保护 |
+| 鉴权 | **Auth.js v5** + bcryptjs + Resend | Credentials / Google / GitHub 三 provider + JWT + 邮箱验证 + 登录 rate limit + `proxy.ts` 路由保护 |
 | 图表 | **Recharts** | React 原生 + SVG 输出（可抓取嵌入报告） |
 | 样式 | **Tailwind v4** + CSS variables | `@theme inline` 让 token 体系天然落地 |
 | 主题 | next-themes | SSR 安全、不闪 |
@@ -294,6 +294,8 @@ data-analysis-agent/
   - LLM 生成的动态提问建议
 - [x] **Vision 多模态架构** — 后端协议层 ready，前端 UI 待 vision-capable LLM 启用
 - [x] **工具系统重构** — 自注册 registry（借鉴 Nous Research Hermes Agent）+ zod 校验，新增工具只需 1 个文件
+- [x] **鉴权完整化** — 登录失败 rate limit（DB 滑动窗口）+ 邮箱验证（Resend + 24h TTL）+ OAuth（Google / GitHub）
+- [ ] **Prisma 6 → 7 升级** — WASM driver adapter，包体积 14MB → 1.6MB，cold start 加速
 - [ ] **E2B 沙箱** — 替代 better-sqlite3 跑真 Python（需付费 API key）
 - [ ] **二次 LLM 调用缓存** — 同 intent 复用，省 token
 - [ ] **多 Excel sheet 支持** — 当前只读第一个

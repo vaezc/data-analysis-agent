@@ -50,6 +50,17 @@
 - `agent.ts` 的 `defaultDescription` 工具特例派发逻辑搬到 registry 的 `uiDescriptionFrom`
 - 引入 zod（已通过 openai SDK 间接安装 ^4.4.3）做运行时校验 + args 类型推断
 
+### Phase 6（2026-05-20）— 鉴权完整化
+
+**目标**：在 Phase 4 的 Auth.js 骨架上一并落地登录暴力破解防御、邮箱验证、OAuth 三大件，把"鉴权"从"能用"提到"生产级"。
+
+- 三条 migration 同日合并（`add_login_attempts` + `add_email_verification` + `add_oauth_accounts`）
+- 登录失败滑动窗口（15min / 5 次）+ 关键放在 bcrypt **前**
+- Resend 邮件验证（24h TTL + 一次性 + 60s 重发节流）
+- Google + GitHub OAuth（PrismaAdapter + JWT 共用）
+- `authorize()` 顺序固化：rate limit → bcrypt → emailVerified
+- 三种 `CredentialsSignin` 子类把 error code 透传到前端，定制中文文案
+
 ---
 
 ## 2. 当前进度（Phase 1）
@@ -368,9 +379,9 @@
   - 我们能直接获得：L14（Turbopack + Prisma binary）问题消失 + cold start 更快
   - 强制要改：schema provider 改 `prisma-client` / package.json `"type": "module"` / 装 `@prisma/adapter-pg` / 连接池 v7 默认值重新校准
   - 时机：等 Phase 4 完全稳定后单独立项升，不混在已完成的数据层迁移里
-- 注册时发邮件验证（防 typo / 防爬虫）
-- OAuth provider（Google / GitHub），扩展 Credentials provider
-- 登录失败 rate limit（Vercel KV 计数器，防暴力破解）
+- ~~注册时发邮件验证~~ ✅ Phase 6 完成（详见 §7.2）
+- ~~OAuth provider（Google / GitHub）~~ ✅ Phase 6 完成（详见 §7.3）
+- ~~登录失败 rate limit~~ ✅ Phase 6 完成（详见 §7.1，DB 实现，不走 Vercel KV）
 - MFA / TOTP（敏感操作二次验证）
 
 ### 6.5 文档同步状态
@@ -381,3 +392,77 @@
 - [x] LEARNING.md：4.X 新亮点（Prisma 迁移、Auth.js 双文件、JWT、jsonb 优化、L12-L15 踩坑）
 - [x] INTERVIEW.md：新增 STAR 故事 + Q&A + 简历文案 + 数字速查更新
 - [x] FLOW.md：§11 路径更新（lib/messages-store.ts → lib/db/messages.ts 等）
+
+---
+
+## 7. Phase 6 进度（2026-05-20）— 鉴权完整化
+
+> Phase 4 落地了 Credentials + JWT + bcrypt 的基础闭环。Phase 6 在同一 day 把生产级鉴权该有的三件事一次性补齐：登录暴力破解防御、邮箱验证、OAuth。三条 migration 紧挨着合进 git，逻辑上属于同一阶段，故归入 Phase 6。
+
+### 7.1 登录失败 rate limit ✅
+
+**新增**：`prisma/migrations/20260520064951_add_login_attempts` + `lib/auth/rate-limit.ts`（87 行）
+
+**算法**：滑动窗口
+- 15 分钟窗口 + 5 次失败阈值
+- 查窗口内 desc 排序 take 5 → 不满 5 直接放行；满 5 取最早一次 + 15min = 解锁时间
+- 边界：最早那次刚好出窗口 → 视为放行（下次 record 时窗口自然滑动）
+
+**关键设计**：
+- **key 是 email 不是 IP**：IP 跨用户共享（公司 NAT / CGNAT）不靠谱；email 是攻击目标本身
+- **不存在的 email 也照样 record**：防 email enumeration（攻击者通过响应快慢分辨邮箱存在性）
+- **登录成功 `clearFailedAttempts(email)`**：老失败不留尾巴，否则合法用户慢慢累积失败也会被锁
+- **`LoginAttempt` 不外键到 User**：因为可能针对不存在用户暴力破解，外键反而限制了
+- 在 `auth.ts` `authorize()` 里放**最前面**，bcrypt 之前：防止攻击者烧 CPU
+
+**清理策略**：当前不自动清，每条 ~100 字节，1 万条 ~1 MB。生产可加 Vercel cron 每天 `DELETE WHERE created_at < NOW() - INTERVAL '7 days'`。
+
+**前端文案**：`RateLimitError` 继承 `CredentialsSignin`，`code='RateLimit'` 透传到 `res.error`，登录页可定制中文文案"登录失败次数过多，请稍后重试"。
+
+### 7.2 邮箱验证 ✅
+
+**新增**：
+- `prisma/migrations/20260520091850_add_email_verification` —— `User.emailVerified DateTime?` + `email_verification_tokens` 表
+- `lib/auth/email.ts`（约 210 行，含 HTML 邮件模板）
+- `app/api/auth/verify-email/route.ts` + `app/api/auth/resend-verification/route.ts`
+- `app/verify-email/page.tsx` —— 客户端读 `?token=` → POST verify-email
+- `package.json` 新增 `resend ^6.12.3`
+
+**关键设计**：
+- **Token**：`crypto.randomBytes(32).toString('base64url')` = 43 字符，不可猜
+- **DB 直接存原值**（生产应存 SHA-256 hash，demo 简化）
+- **24h TTL** + **一次性**：验证成功在同一事务里 `user.emailVerified = now()` + `delete token`
+- **过期 token 顺手删**：避免 DB 累积
+- **重发 60s 节流**：查 `findFirst orderBy createdAt desc`，距上次 < 60s 拒绝
+- **enumeration 防御**：`/api/auth/resend-verification` 对不存在邮箱也返回 200
+- **发件人**：`onboarding@resend.dev`（Resend sandbox，**只能发到注册邮箱**）；生产需 verified domain
+- **注册不阻塞**：邮件发送失败时仍返回 201，把 `verificationEmailSent: false + verificationEmailError` 给前端，用户可在登录页点"重发"
+
+**`authorize()` 中的位置**：放在 bcrypt 校验**之后**。理由：
+- 放在 bcrypt 前会让攻击者用错密码探测"这邮箱是否存在且未验证"
+- 密码对的"未验证"失败**不计入 rate limit**（避免合法用户因为没验证邮箱被锁）
+
+### 7.3 OAuth (Google + GitHub) ✅
+
+**新增**：
+- `prisma/migrations/20260520110805_add_oauth_accounts` —— `accounts` 表 + `User.password` 改可空 + `User.image` 字段
+- `auth.ts` 新增两个 OAuth provider + `PrismaAdapter`
+
+**关键设计**：
+- **PrismaAdapter + JWT session 共用**：Adapter 管 OAuth 用户/Account 表的持久化（这是 PrismaAdapter 必须的工作）；session 仍走 JWT（不建 Session 表，无状态适配 Vercel）
+- **`Account` 表字段名**：**故意 snake_case**（`access_token` / `expires_at` / `provider_account_id`），这是 next-auth 协议要求 —— PrismaAdapter 直接按这些字段名 INSERT，**改成 camelCase 会运行时报错**
+- **`User.password` 改可空**：OAuth 用户没设过密码；Credentials `authorize()` 里加 `!user.password → return null`（外部看起来跟"密码错"一样，防 enumeration "这账号是 OAuth-only"）
+- **`allowDangerousEmailAccountLinking: true`**：若 Google 邮箱已被本地账号占用，自动 link 到同一 User
+  - 风险：攻击者控制对方 Google 账号即能登本地账号
+  - 取舍：OAuth provider 已经验证过邮箱归属，对 demo 项目可接受
+- **复合唯一 `(provider, providerAccountId)`**：同一 Google 账号不能绑两个本应用 User
+- **回调 URL**：`<AUTH_URL>/api/auth/callback/google` + `<AUTH_URL>/api/auth/callback/github`
+- **环境变量**：未配置就不启用，`auth.ts` 直接读 `process.env.GOOGLE_CLIENT_ID` 等（空字符串时 next-auth 会跳过）
+
+### 7.4 文档同步状态（Phase 6）
+
+- [x] CLAUDE.md：鉴权章节补 Provider 矩阵 + authorize() 顺序 + 三个子专节（email / rate limit / OAuth）；migration 列表 2 → 5；当前状态更新
+- [x] PROGRESS.md：本节
+- [x] README.md：核心特性「生产级鉴权」+ 鉴权技术栈表（三 provider + 邮箱验证 + rate limit）
+- [ ] LEARNING.md：Phase 6 三件事的踩坑 / 设计取舍（后续单独立项）
+- [ ] INTERVIEW.md：rate limit / email verification / OAuth 的 STAR 故事（后续单独立项）
