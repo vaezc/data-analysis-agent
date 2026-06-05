@@ -196,9 +196,9 @@ npm run dev
 #    AUTH_SECRET           = <openssl rand -base64 32>
 #    AUTH_URL              = https://<your-domain>.vercel.app
 #    AUTH_TRUST_HOST       = true   # Vercel preview / 自定义域名必加
-# 4. 在 build command 里加 prisma migrate deploy：
-#    "build": "prisma migrate deploy && next build"
-# 5. Deploy
+# 4. Deploy（build = "prisma generate && next build"，构建不连库）
+#    注：migration 不在 build 里跑。新增 migration 时部署前先手动
+#    npm run db:migrate:deploy（详见 DEPLOY.md §4）
 ```
 
 ---

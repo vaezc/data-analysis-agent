@@ -95,17 +95,32 @@ Google 单个 OAuth App **支持多个 Authorized redirect URIs**：
 
 ## 4. 数据库 schema 同步
 
-`package.json` 的 `build` 已改为：
+> **重要变更（2026-06）**：migration **不再**在 Vercel build 里跑。
+> 原 `build` 是 `prisma generate && prisma migrate deploy && next build`，
+> 把每次部署绑死在「构建时数据库必须可达」上 —— Supabase 免费层闲置 7 天自动暂停后，
+> 连纯前端改动都会构建失败（`tenant/user ... not found`）。已解耦。
+
+`package.json` 的 `build` 现在是：
 ```json
-"build": "prisma generate && prisma migrate deploy && next build"
+"build": "prisma generate && next build"
 ```
 
-每次 Vercel 自动部署都会：
-1. `prisma generate` —— 生成最新 Prisma Client
-2. `prisma migrate deploy` —— **只应用还没跑过的 migration**（生产安全，不像 `migrate dev` 会动 schema）
-3. `next build` —— 构建 Next.js
+`prisma generate` 只读 schema 文件生成 Client，**不连数据库** —— 构建从此与库状态无关。
 
-### 当前 5 个 migration 应该都已应用到生产 DB（因为开发库就是同一个 Supabase）
+### Migration 改为「部署前手动应用」
+
+凡是 `prisma/migrations/` 里**新增了 migration**，部署前先对生产库跑一次：
+
+```bash
+npm run db:migrate:deploy   # = prisma migrate deploy，只应用未跑过的 migration
+```
+
+它走 `.env` 的 `DIRECT_URL`（5432 直连），生产安全（不像 `migrate dev` 会动 schema / 生成新文件）。
+**没有新 migration 的部署（纯前端 / 逻辑改动）跳过这步即可。**
+
+顺序铁律：**先 `db:migrate:deploy`（库先有新列），再 push 触发部署（新代码才用到新列）**。反过来会让线上代码查不存在的列。
+
+### 当前 5 个 migration 都已应用到生产 DB（开发库即同一个 Supabase）
 
 ```
 prisma/migrations/
@@ -116,7 +131,7 @@ prisma/migrations/
 └─ 20260520110805_add_oauth_accounts         User.password 可空 + image + Account
 ```
 
-可以 `npx prisma migrate status` 本地验证。
+随时 `npx prisma migrate status` 验证生产库是否最新。
 
 ---
 
@@ -136,7 +151,7 @@ Vercel 检测到 commit 自动开 build。
 
 如果代码没新 commit 但你想用新 env vars 重部署：
 - Vercel Dashboard → Deployments → 最近一次 → 三点菜单 → **Redeploy**
-- **勾选 "Use existing Build Cache" 取消**（重新跑 prisma migrate deploy）
+- 改了 env vars 才需要取消 **"Use existing Build Cache"**；只换代码可保留缓存加速
 
 ---
 
@@ -178,7 +193,9 @@ Vercel 检测到 commit 自动开 build。
 | 症状 | 原因 | 修法 |
 |---|---|---|
 | Vercel Build 失败 `Environment variable not found: DATABASE_URL` | env 没配 | 在 Vercel Dashboard 补 |
-| `prisma migrate deploy` 失败 `P3018: A migration failed` | 已有 schema 冲突（如手动改过 DB） | Supabase Dashboard 看 `_prisma_migrations` 表，删失败行后 redeploy |
+| 部署后线上报「列不存在 / column does not exist」 | 加了新 migration 但忘了对生产库 `npm run db:migrate:deploy` | 先跑 `db:migrate:deploy` 再 redeploy（顺序：库先迁移，代码后上线） |
+| `npm run db:migrate:deploy` 报 `tenant/user ... not found` | Supabase 免费层项目被暂停 | Dashboard → 项目 → Restore，等 1~3 分钟拉起后重试 |
+| `db:migrate:deploy` 失败 `P3018: A migration failed` | 已有 schema 冲突（如手动改过 DB） | Supabase Dashboard 看 `_prisma_migrations` 表，删失败行后重跑 |
 | 登录后 session.user.id 是 undefined | jwt/session callback 没运行 | 检查 `auth.config.ts` 有 `jwt` 和 `session` callback |
 | OAuth 回调跳到 `error=Configuration` | client_id/secret 没配，或 callback URL 没对上 | 比对 Vercel env 和 OAuth App callback |
 | 邮件发不出去 | RESEND_FROM_EMAIL 不是 verify 过的域名 | 用 `onboarding@resend.dev` 或在 Resend verify 自己 domain |
