@@ -1,6 +1,6 @@
 'use client'
 
-import { BarChart3, Loader2, Trash2, Users } from 'lucide-react'
+import { BarChart3, Loader2, Search, Trash2, Users } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { ThemeToggle } from '@/components/ui/ThemeToggle'
@@ -16,6 +16,9 @@ interface DemoSpec {
   meta: string
   icon: typeof BarChart3
 }
+
+// 数据集数量达到此阈值才显示搜索框
+const SEARCH_THRESHOLD = 6
 
 const DEMOS: DemoSpec[] = [
   {
@@ -39,6 +42,8 @@ export default function Home() {
   const [datasetsLoaded, setDatasetsLoaded] = useState(false)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [loadingDemo, setLoadingDemo] = useState<string | null>(null)
+  // 数据集多时才显示搜索框；按名字实时过滤
+  const [query, setQuery] = useState('')
 
   // 启动时加载已上传的数据集列表
   useEffect(() => {
@@ -124,6 +129,13 @@ export default function Home() {
 
   const active = datasets.find((d) => d.id === activeId) ?? null
 
+  // 数据集达到阈值才显示搜索框，少量时不打扰
+  const showSearch = datasetsLoaded && datasets.length >= SEARCH_THRESHOLD
+  const trimmedQuery = query.trim().toLowerCase()
+  const filtered = trimmedQuery
+    ? datasets.filter((d) => d.name.toLowerCase().includes(trimmedQuery))
+    : datasets
+
   return (
     <div className="flex h-screen bg-bg text-fg">
       {/* ---------- Sidebar ---------- */}
@@ -156,10 +168,24 @@ export default function Home() {
             </div>
             {datasets.length > 0 && (
               <span className="text-[11px] text-fg-subtle tabular-nums">
-                {datasets.length}
+                {trimmedQuery ? `${filtered.length}/${datasets.length}` : datasets.length}
               </span>
             )}
           </div>
+
+          {showSearch && (
+            <div className="relative mb-2.5">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-fg-subtle" />
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="搜索数据集..."
+                aria-label="搜索数据集"
+                className="w-full rounded-md border border-border bg-surface/50 py-1.5 pl-8 pr-2 text-sm text-fg placeholder:text-fg-subtle transition duration-150 focus:border-accent/40 focus:outline-none focus:ring-2 focus:ring-accent/40"
+              />
+            </div>
+          )}
 
           {!datasetsLoaded ? (
             <DatasetListSkeleton />
@@ -201,9 +227,13 @@ export default function Home() {
                 })}
               </div>
             </div>
+          ) : filtered.length === 0 ? (
+            <div className="px-3 py-6 text-center text-xs text-fg-subtle">
+              没有匹配「{query.trim()}」的数据集
+            </div>
           ) : (
             <div className="space-y-1">
-              {datasets.map((ds) => {
+              {filtered.map((ds) => {
                 const isActive = ds.id === activeId
                 return (
                   <div
