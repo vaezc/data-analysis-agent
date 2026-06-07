@@ -461,8 +461,9 @@
 - [x] CLAUDE.md：鉴权章节补 Provider 矩阵 + authorize() 顺序 + 三个子专节（email / rate limit / OAuth）；migration 列表 2 → 5；当前状态更新
 - [x] PROGRESS.md：本节
 - [x] README.md：核心特性「生产级鉴权」+ 鉴权技术栈表（三 provider + 邮箱验证 + rate limit）
-- [ ] LEARNING.md：Phase 6 三件事的踩坑 / 设计取舍（后续单独立项）
-- [ ] INTERVIEW.md：rate limit / email verification / OAuth 的 STAR 故事（后续单独立项）
+- [x] ✅ LEARNING.md：补 §7.9 近期演进（Prisma 7 升级 + 部署解耦 + 测试/CI + 缓存 + 可观测性 + 重试 + 加固，2026-06）
+- [x] ✅ INTERVIEW.md：补 §12.9（STAR 故事 6-8：Prisma 7 迁移 / 部署排错 / 监控→韧性，+ 高频问答）
+  - 注：learning/ 全部 gitignore，仅本地；Phase 6 鉴权 STAR 已部分散落在原 §5
 
 ---
 
