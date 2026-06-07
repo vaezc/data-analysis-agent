@@ -12,6 +12,7 @@
 // ============================================================
 
 import OpenAI from 'openai'
+import { withRetry } from '@/lib/retry'
 import type {
   ChatCompletion,
   ChatCompletionMessageParam,
@@ -264,16 +265,32 @@ export async function chatCompletion(
   const label = `#${++_callCounter}${params.debugTag ? ` ${params.debugTag}` : ''}`
   logRequest(label, cfg, params, false)
 
-  const resp = await client.chat.completions.create({
-    model: cfg.model,
-    messages: params.messages,
-    tools: params.tools,
-    tool_choice: params.tools ? 'auto' : undefined,
-    temperature: params.temperature ?? 0.7,
-  })
+  const resp = await withRetry(
+    () =>
+      client.chat.completions.create({
+        model: cfg.model,
+        messages: params.messages,
+        tools: params.tools,
+        tool_choice: params.tools ? 'auto' : undefined,
+        temperature: params.temperature ?? 0.7,
+      }),
+    { onRetry: logRetry(label) },
+  )
 
   logResponseNonStream(label, resp)
   return resp
+}
+
+/** 重试日志：把瞬时失败 + 退避打到服务端日志，便于和 [agent-metrics] 对照。 */
+function logRetry(
+  label: string,
+): (info: { attempt: number; error: unknown; delayMs: number }) => void {
+  return ({ attempt, error, delayMs }) => {
+    const msg = error instanceof Error ? error.message : String(error)
+    console.warn(
+      `[LLM ${label}] 瞬时失败，${delayMs}ms 后第 ${attempt} 次重试：${msg}`,
+    )
+  }
 }
 
 /**
@@ -289,17 +306,23 @@ export async function* chatCompletionStream(params: ChatCompletionParams) {
   const label = `#${++_callCounter}${params.debugTag ? ` ${params.debugTag}` : ''}`
   logRequest(label, cfg, params, true)
 
-  const stream = await client.chat.completions.create({
-    model: cfg.model,
-    messages: params.messages,
-    tools: params.tools,
-    tool_choice: params.tools ? 'auto' : undefined,
-    temperature: params.temperature ?? 0.7,
-    stream: true,
-    // 让最后一个 chunk 携带 usage（token 数），供可观测性统计。
-    // OpenAI 兼容；DeepSeek 同样在 stream 末尾回 usage。
-    stream_options: { include_usage: true },
-  })
+  // 只重试"建流"阶段的瞬时失败（限流 / 5xx / 网络）；流一旦开始消费就不再重试
+  // （已产出 partial output，重试会重复）。建流前的 429 是最常见的限流点。
+  const stream = await withRetry(
+    () =>
+      client.chat.completions.create({
+        model: cfg.model,
+        messages: params.messages,
+        tools: params.tools,
+        tool_choice: params.tools ? 'auto' : undefined,
+        temperature: params.temperature ?? 0.7,
+        stream: true,
+        // 让最后一个 chunk 携带 usage（token 数），供可观测性统计。
+        // OpenAI 兼容；DeepSeek 同样在 stream 末尾回 usage。
+        stream_options: { include_usage: true },
+      }),
+    { onRetry: logRetry(label) },
+  )
 
   // 累积流式 chunk 用于完成后打 summary。yield 原样透传，不影响调用方。
   let content = ''
