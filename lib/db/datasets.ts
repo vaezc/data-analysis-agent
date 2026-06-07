@@ -41,8 +41,13 @@ export function parseCSV(text: string): RawTable {
     // 不开 dynamicTyping：保留原始字符串，自己做类型推断与转换，
     // 避免 "001" 邮编被吃成 1、日期被乱猜等问题。
   })
-  if (result.errors.length > 0) {
-    const first = result.errors[0]
+  // 单列 CSV 无分隔符可探测，papaparse 会 default 到 ',' 并照常正确解析，
+  // 只是附一条 UndetectableDelimiter 警告——它是良性的，不当作错误（否则单列 CSV 上传会失败）。
+  const fatalErrors = result.errors.filter(
+    (e) => e.code !== 'UndetectableDelimiter',
+  )
+  if (fatalErrors.length > 0) {
+    const first = fatalErrors[0]
     throw new Error(`CSV 解析失败：${first.message}（第 ${first.row} 行）`)
   }
   const data = result.data

@@ -36,10 +36,12 @@ describe('parseCSV', () => {
     ])
   })
 
-  it('【已知局限】单列 CSV（无分隔符）会被 papaparse 判为无法探测分隔符而抛错', () => {
-    // papaparse 关闭 header 后靠采样自动探测分隔符；只有一列时探测失败 → 报错。
-    // 真实影响：单列 CSV 上传会失败。修法是 parseCSV 显式指定 delimiter:','（待评估）。
-    expect(() => parseCSV('zip\n007\n012')).toThrow('解析失败')
+  it('单列 CSV（无分隔符）正常解析（UndetectableDelimiter 警告被视为良性）', () => {
+    // 回归：papaparse 探测不到分隔符会 default 到 ',' 并正确解析，只附一条良性警告；
+    // parseCSV 过滤该警告，不再误判为错误。修复前单列 CSV 上传会失败。
+    const { headers, rows } = parseCSV('zip\n007\n012')
+    expect(headers).toEqual(['zip'])
+    expect(rows).toEqual([['007'], ['012']])
   })
 
   it('带引号的字段含逗号不被拆列', () => {
