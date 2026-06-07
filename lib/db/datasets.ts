@@ -32,7 +32,9 @@ interface RawTable {
   rows: string[][]
 }
 
-function parseCSV(text: string): RawTable {
+// 导出纯解析/推断函数供单测直接覆盖（不经 DB）。它们无副作用，
+// 类型推断/转换作用于 string[][]，对 CSV 与 Excel 两条路径通用。
+export function parseCSV(text: string): RawTable {
   const result = Papa.parse<string[]>(text, {
     header: false,
     skipEmptyLines: true,
@@ -114,7 +116,7 @@ function isDateLike(v: string): boolean {
  * 取前 50 个非空样本推断列类型。判断优先级：boolean > number > date > string。
  * 顺序原因：纯数字字符串能通过 Date.parse 也可能符合日期正则，因此 number 必须先判。
  */
-function inferColumnType(values: string[]): ColumnType {
+export function inferColumnType(values: string[]): ColumnType {
   const sample = values.filter((v) => v !== '' && v != null).slice(0, 50)
   if (sample.length === 0) return 'string'
   if (sample.every(isBooleanLike)) return 'boolean'
@@ -123,7 +125,7 @@ function inferColumnType(values: string[]): ColumnType {
   return 'string'
 }
 
-function coerceValue(value: string, type: ColumnType): unknown {
+export function coerceValue(value: string, type: ColumnType): unknown {
   if (value == null || value === '') return null
   switch (type) {
     case 'number':
