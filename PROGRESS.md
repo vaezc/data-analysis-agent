@@ -150,11 +150,11 @@
 - **解决方案**：`run-analysis.ts:truncateForLLM`：数组超 30 项切前 30 + `_truncated` 元信息（含原长度、shown 数量、给 LLM 的 hint）；非数组 JSON 超 6000 字符（~1500 token）兜底警告。SYSTEM_PROMPT 加一条让 LLM 理解 `_truncated` 字段不要原样展示。
 - **效果**：单 tool result 从可能 2K+ token 降到 ~500 token 级别，长对话累积 token 增长降约 70%。
 
-### L10. 二次 LLM 调用无缓存
+### L10. 二次 LLM 调用无缓存 ✅ 已解决（2026-06）
 
-- **位置**：`lib/tools/run-analysis.ts` 的 `generateAnalysisSQL`
-- **影响**：相同 intent + dataset 每次都重新生成代码，浪费 token。
-- **解决**：Phase 2 用 `(datasetId, intent)` 做 LRU 缓存。
+- ~~**位置**：`lib/tools/run-analysis.ts` 的 `generateAnalysisSQL`~~
+- ~~**影响**：相同 intent + dataset 每次都重新生成代码，浪费 token。~~
+- **解决方案**：`lib/lru-cache.ts` 通用 LRU（100 条）+ run-analysis 按 `(datasetId, intent)` 缓存生成的 SQL。只缓存执行成功的 SQL（先执行后写）；数据集不可变，结构 SQL 安全复用；serverless 暖实例内有效。
 
 ### L11. AI 回答的 Markdown 未渲染（验收暴露）✅ 已解决
 
@@ -168,7 +168,7 @@
 
 ### 4.1 性能
 
-- [ ] 二次 LLM 调用结果缓存（同 L10）
+- [x] ✅ 二次 LLM 调用结果缓存（L10：lib/lru-cache + run-analysis 按 (datasetId,intent) 缓存 SQL）
 - [ ] 大数据集 inspect_data 时延优化（当前会遍历全列做 nullCount，行数大时可改抽样）
 - [x] ✅ tool result 自动截断（L9）
 - [x] ✅ 滑动窗口：loadConversation 限制最近 40 条 messages
@@ -198,16 +198,17 @@
 
 - [x] ✅ 工具系统重构：自注册 registry + zod 校验（Phase 5，借鉴 Hermes Agent）
 - [x] ✅ 工具单测（vitest，`lib/tools/*.test.ts`：sqlite-runner 23 + registry 10 = 33）
-- [ ] CSV/Excel 解析的边界用例测试
+- [x] ✅ CSV/Excel 解析的边界用例测试（lib/db/datasets.test.ts，25 例：类型推断优先级/千分位/混合/空值）
 - [ ] 添加 ESLint 规则禁止 `any`、强制 explicit return type
 - [x] ✅ CI（GitHub Actions：prisma generate + tsc + lint + test，push/PR 触发）
 - [ ] 多 Excel sheet 支持（当前只读第一个）
 
 ### 4.5 可观测性
 
-- [ ] 每次工具调用的耗时 + token 数记录（开发期 console.table，生产期 Supabase）
-- [ ] LLM 调用失败率监控
-- [ ] Agent 步数分布统计（看 max_steps=10 是否够）
+- [x] ✅ 每次工具调用的耗时 + token 数记录（lib/observability.ts，[agent-metrics] 结构化日志 + dev console.table）
+- [x] ✅ LLM 调用失败率监控（AgentMetrics 记每步 LLM 成败 + 汇总 failures）
+- [x] ✅ Agent 步数（LLM calls）+ 每工具调用次数/耗时分布（summarize byTool）
+- 生产期把 [agent-metrics] 日志接 Supabase / 日志 drain（留待后续，不阻塞）
 
 ### 4.6 安全
 
