@@ -10,7 +10,19 @@ import { defineTool } from './registry'
 import { chatCompletion } from '@/lib/llm'
 import { getDataset } from '@/lib/db/datasets'
 import { runSQLOnDataset } from '@/lib/tools/sqlite-runner'
+import { LruCache } from '@/lib/lru-cache'
 import type { AnalysisResult, Column, Row } from '@/types'
+
+// 二次 LLM 生成的 SQL 缓存：键 (datasetId, intent)，命中即跳过一次 LLM 调用。
+// 数据集上传后不可变，结构 SQL 可安全复用；命中仍重跑 SQLite 打实时数据。
+// 只缓存"执行成功"的 SQL（见 run），避免坏 SQL 被缓存后反复失败。
+// 100 条上限，serverless 暖实例内有效，冷启动清零，无需失效逻辑。
+const sqlCache = new LruCache<string, string>(100)
+
+/** 缓存键：JSON 数组序列化，datasetId / intent 边界清晰、无拼接歧义。 */
+function sqlCacheKey(datasetId: string, intent: string): string {
+  return JSON.stringify([datasetId, intent.trim()])
+}
 
 const schema = z.object({
   dataset_id: z.string().min(1),
@@ -148,12 +160,16 @@ export const runAnalysisTool = defineTool({
     const ds = await getDataset(args.dataset_id, ctx.userId)
     if (!ds) throw new Error(`数据集不存在：${args.dataset_id}`)
 
-    const sql = await generateAnalysisSQL(
-      ds.columns,
-      ds.rows.slice(0, 2),
-      args.intent,
-    )
+    // 命中缓存则跳过二次 LLM；未命中才生成。
+    const cacheKey = sqlCacheKey(args.dataset_id, args.intent)
+    const cached = sqlCache.get(cacheKey)
+    const sql =
+      cached ??
+      (await generateAnalysisSQL(ds.columns, ds.rows.slice(0, 2), args.intent))
+
+    // 先执行（坏 SQL 在此抛错），成功后才写缓存——避免缓存无法执行的 SQL。
     const result = runSQLOnDataset(sql, ds.columns, ds.rows)
+    if (cached === undefined) sqlCache.set(cacheKey, sql)
 
     return { description: args.description, data: truncateForLLM(result) }
   },
