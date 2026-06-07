@@ -363,10 +363,14 @@ data-agent/
 │   ├── auth/UserMenu.tsx                     # sidebar 底部头像 + 退出
 │   └── ui/                                   # 基础组件，自己写
 ├── lib/
-│   ├── llm.ts                                # LLM provider 抽象
-│   ├── agent.ts                              # Agent 主循环
-│   ├── prisma.ts                             # PrismaClient 单例
+│   ├── llm.ts                                # LLM provider 抽象（含瞬时失败重试 + stream usage）
+│   ├── agent.ts                              # Agent 主循环（含 AgentMetrics 埋点）
+│   ├── prisma.ts                             # PrismaClient 单例（Prisma 7 + adapter-pg）
 │   ├── suggestions.ts                        # LLM 生成动态 suggestions
+│   ├── retry.ts                              # withRetry + isRetryableError（指数退避）
+│   ├── observability.ts                      # AgentMetrics：LLM/工具 耗时+token+失败率
+│   ├── lru-cache.ts                          # 通用 LRU（二次 LLM SQL 缓存用）
+│   ├── generated/prisma/                     # Prisma 7 生成的 client（gitignore）
 │   ├── db/
 │   │   ├── datasets.ts
 │   │   └── messages.ts

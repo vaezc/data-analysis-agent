@@ -182,7 +182,7 @@
 ### 4.3 用户体验
 
 - [x] ✅ 流式 answer（L7）
-- [x] ✅ Agent 步骤展示（实现为 always 单行 summary，click 可展开历史步骤）
+- [x] ✅ Agent 步骤展示（单行 summary + 点击展开）→ 打磨：grid-rows 平滑展开动效 + chevron 旋转 + 步骤间时间线连接线
 - [x] ✅ 错误以 inline 顶部 banner 提示（不用 alert）
 - [x] ✅ 错误条 dismiss × 按钮
 - [x] ✅ 数据集删除（sidebar hover trash icon）
@@ -191,8 +191,8 @@
 - [x] ✅ 切换 dataset HistorySkeleton + 同步定位（`useLayoutEffect`）
 - [x] ✅ LLM 生成动态 suggestions（替代硬拼模板）
 - [ ] 图表交互（hover tooltip ✅；点击下钻 ⏳）
-- [ ] 数据集列表搜索（datasets > 10 时需要）
-- [ ] 文件上传进度条 + 大文件分片
+- [x] ✅ 数据集列表搜索（≥6 个时显示搜索框，按名字实时过滤，计数显示 命中/总数）
+- [x] ✅ 文件上传进度条（XHR upload.onprogress，百分比填充 +「解析中」阶段）；大文件分片仍未做
 
 ### 4.4 工程
 

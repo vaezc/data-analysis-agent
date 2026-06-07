@@ -73,7 +73,7 @@ Agent:   [Database]    正在读取数据结构...         ✓
 - 🌊 **全程流式** — 文字 / 工具步骤 / 图表 / 报告通过 SSE 实时推送
 - 🧠 **支持 DeepSeek V4 thinking mode** — `reasoning_content` 字段按协议回 echo
 - 🗃️ **真 SQL 执行** — LLM 生成 SQLite SQL → better-sqlite3 `:memory:` 执行，支持 GROUP BY / 窗口函数 / CTE
-- 💾 **Prisma + Postgres 持久化** — users / accounts / datasets / messages 等 6 表，5 次 migration 进 git，刷新不丢数据
+- 💾 **Prisma 7 + Postgres 持久化** — driver adapter 架构（`@prisma/adapter-pg`，无 Rust binary），6 表、5 次 migration 进 git，刷新不丢数据
 - 🔐 **生产级鉴权** — Auth.js v5 + bcrypt(12) + JWT；Credentials / Google / GitHub 三 provider；邮箱验证 + 登录失败滑动窗口（15min/5 次）+ enumeration 防御；`proxy.ts` 路由级保护、owner 校验防越权
 - 📊 **4 种图表类型** — bar / line / pie / scatter，基于 Recharts，主题色自动跟随
 - 📄 **HTML 报告导出** — 内嵌 SVG 图表，离线可双击打开，无外部依赖
@@ -84,6 +84,11 @@ Agent:   [Database]    正在读取数据结构...         ✓
 - ✨ **动态提问建议** — LLM 根据 dataset schema 生成自然中文示例问题（替代硬编码模板）
 - ✂️ **Token 控制** — tool result 截断 + 滑动窗口（最近 40 条消息），长对话不爆上下文
 - 🎯 **一键试用** — 内置 2 个 demo 数据集，新用户零门槛体验
+- 🔁 **瞬时失败重试** — 限流 / 5xx / 网络抖动指数退避重试，4xx 参数错立即抛（不浪费 token）
+- 📈 **可观测性** — 每轮 Agent 记录 LLM/工具 耗时 + token + 失败率，结构化 `[agent-metrics]` 日志
+- ⚡ **二次 LLM 缓存** — 同 `(datasetId, intent)` 复用生成的 SQL，LRU 100 条
+- 🔎 **数据集搜索 + 上传进度条** — 侧栏按名过滤、上传百分比进度 +「解析中」阶段
+- 🧪 **测试 + CI** — vitest 79 例（解析 / SQL 沙箱 / registry / 缓存 / 重试 / 指标）+ GitHub Actions（tsc + lint + test）
 
 ---
 
