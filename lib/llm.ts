@@ -296,6 +296,9 @@ export async function* chatCompletionStream(params: ChatCompletionParams) {
     tool_choice: params.tools ? 'auto' : undefined,
     temperature: params.temperature ?? 0.7,
     stream: true,
+    // 让最后一个 chunk 携带 usage（token 数），供可观测性统计。
+    // OpenAI 兼容；DeepSeek 同样在 stream 末尾回 usage。
+    stream_options: { include_usage: true },
   })
 
   // 累积流式 chunk 用于完成后打 summary。yield 原样透传，不影响调用方。

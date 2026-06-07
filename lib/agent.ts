@@ -23,6 +23,7 @@ import {
   isToolName,
   type ToolExecutionContext,
 } from '@/lib/tools'
+import { AgentMetrics } from '@/lib/observability'
 import type { StreamEvent } from '@/types'
 
 // 模块加载时 registry 已经被 lib/tools/index.ts 的 side-effect import 填充。
@@ -115,15 +116,13 @@ export async function runAgent(params: RunAgentParams): Promise<void> {
   // 本轮开始时 messages 的长度（system + 历史），用于 done 事件计算"本轮新增"的切片
   const baseLength = messages.length - 1 // 减去刚 push 的 user message，让本轮新增从 user 开始
 
+  // 可观测性：记录每步 LLM（耗时 + token + 成败）与每次工具调用（耗时 + 成败）。
+  const metrics = new AgentMetrics()
+
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       // ---------- 流式调 LLM，累积本轮 chunks ----------
-      const stream = await chatCompletionStream({
-        messages,
-        tools: TOOL_LIST,
-        debugTag: `agent step=${step}`,
-      })
-
+      const stepStart = performance.now()
       let contentBuffer = ''
       let reasoningBuffer = ''
       // 多个 tool_calls 按 delta.index 累积，arguments 是 incremental 字符串
@@ -131,38 +130,72 @@ export async function runAgent(params: RunAgentParams): Promise<void> {
         number,
         { id?: string; name?: string; args: string }
       >()
+      // include_usage 让 stream 末尾的 chunk 带 token 数（choices 为空）。
+      let usage: {
+        prompt_tokens?: number
+        completion_tokens?: number
+        total_tokens?: number
+      } | null = null
 
-      for await (const chunk of stream) {
-        const choice = chunk.choices[0]
-        if (!choice) continue
-        const delta = choice.delta
+      try {
+        const stream = await chatCompletionStream({
+          messages,
+          tools: TOOL_LIST,
+          debugTag: `agent step=${step}`,
+        })
 
-        // 文本 delta → 流式推给前端
-        if (typeof delta.content === 'string' && delta.content.length > 0) {
-          contentBuffer += delta.content
-          onEvent({ type: 'answer_delta', text: delta.content })
-        }
+        for await (const chunk of stream) {
+          if (chunk.usage) usage = chunk.usage
+          const choice = chunk.choices[0]
+          if (!choice) continue
+          const delta = choice.delta
 
-        // DeepSeek V4 thinking mode 扩展字段（OpenAI SDK 类型不认识，断言取）
-        const extDelta = delta as typeof delta & {
-          reasoning_content?: string | null
-        }
-        if (typeof extDelta.reasoning_content === 'string') {
-          reasoningBuffer += extDelta.reasoning_content
-        }
+          // 文本 delta → 流式推给前端
+          if (typeof delta.content === 'string' && delta.content.length > 0) {
+            contentBuffer += delta.content
+            onEvent({ type: 'answer_delta', text: delta.content })
+          }
 
-        // tool_calls delta：按 index 分桶累积
-        if (delta.tool_calls) {
-          for (const tc of delta.tool_calls) {
-            const idx = tc.index
-            const acc = toolCallAccs.get(idx) ?? { args: '' }
-            if (tc.id) acc.id = tc.id
-            if (tc.function?.name) acc.name = tc.function.name
-            if (tc.function?.arguments) acc.args += tc.function.arguments
-            toolCallAccs.set(idx, acc)
+          // DeepSeek V4 thinking mode 扩展字段（OpenAI SDK 类型不认识，断言取）
+          const extDelta = delta as typeof delta & {
+            reasoning_content?: string | null
+          }
+          if (typeof extDelta.reasoning_content === 'string') {
+            reasoningBuffer += extDelta.reasoning_content
+          }
+
+          // tool_calls delta：按 index 分桶累积
+          if (delta.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index
+              const acc = toolCallAccs.get(idx) ?? { args: '' }
+              if (tc.id) acc.id = tc.id
+              if (tc.function?.name) acc.name = tc.function.name
+              if (tc.function?.arguments) acc.args += tc.function.arguments
+              toolCallAccs.set(idx, acc)
+            }
           }
         }
+      } catch (e) {
+        metrics.recordLlm({
+          label: `step=${step}`,
+          durationMs: performance.now() - stepStart,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          ok: false,
+        })
+        throw e
       }
+
+      metrics.recordLlm({
+        label: `step=${step}`,
+        durationMs: performance.now() - stepStart,
+        promptTokens: usage?.prompt_tokens ?? 0,
+        completionTokens: usage?.completion_tokens ?? 0,
+        totalTokens: usage?.total_tokens ?? 0,
+        ok: true,
+      })
 
       // 组装完整 tool_calls
       const toolCalls = Array.from(toolCallAccs.entries())
@@ -233,7 +266,14 @@ export async function runAgent(params: RunAgentParams): Promise<void> {
         const description = getToolUiDescription(name, parsedArgs)
 
         onEvent({ type: 'tool_start', tool: name, description })
+        const toolStart = performance.now()
         const result = await executeTool(name, parsedArgs, ctx)
+        // executeTool 不抛错：失败统一返回 { error }，据此判成败
+        metrics.recordTool({
+          tool: name,
+          durationMs: performance.now() - toolStart,
+          ok: !isErrorResult(result),
+        })
         onEvent({ type: 'tool_done', tool: name })
 
         messages.push({
@@ -251,6 +291,23 @@ export async function runAgent(params: RunAgentParams): Promise<void> {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     onEvent({ type: 'error', message: `Agent 执行错误：${msg}` })
+  } finally {
+    // 无论成功 / 出错 / 超步数，都输出本轮指标汇总
+    metrics.log(`dataset=${datasetId}`)
+  }
+}
+
+/** executeTool 的返回是 JSON 字符串；{ error: ... } 视为失败。 */
+function isErrorResult(result: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(result)
+    return (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'error' in parsed
+    )
+  } catch {
+    return false // 非 JSON（理论上不会），保守视为成功
   }
 }
 
