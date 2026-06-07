@@ -15,6 +15,7 @@ import OpenAI from 'openai'
 import { withRetry } from '@/lib/retry'
 import type {
   ChatCompletion,
+  ChatCompletionChunk,
   ChatCompletionMessageParam,
   ChatCompletionTool,
 } from 'openai/resources/chat/completions'
@@ -299,7 +300,9 @@ function logRetry(
  *
  * 注：实际上是 async generator——await 返回 generator 本身，再 for-await 消费。
  */
-export async function* chatCompletionStream(params: ChatCompletionParams) {
+export async function* chatCompletionStream(
+  params: ChatCompletionParams,
+): AsyncGenerator<ChatCompletionChunk, void, unknown> {
   const cfg = loadConfig()
   const client = getClient()
 
