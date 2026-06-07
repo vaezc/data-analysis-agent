@@ -176,7 +176,7 @@
 ### 4.2 Agent 行为质量
 
 - [ ] system prompt 加 few-shot 示例（提升复杂问题的工具调度准确率）
-- [ ] system prompt 加 "用中文回答用户" 强约束（避免 DeepSeek 偶尔英文回答）
+- [x] ✅ system prompt 已有"始终用中文回答用户"强制规则（agent.ts SYSTEM_PROMPT）
 - [ ] 工具调用失败时的 retry 策略（区分可重试错误如限流 vs 不可重试错误如参数错）
 
 ### 4.3 用户体验
@@ -216,7 +216,7 @@
 - [x] ✅ vm 沙箱替换（L2/L3 已换 better-sqlite3 SQL 执行）
 - [x] ✅ 上传文件大小限制（20MB）
 - [ ] E2B 沙箱（需付费 API key 验证，暂搁）
-- [ ] LLM_API_KEY 服务端隔离（已经在 server only，但要确认不会泄露到客户端 bundle）
+- [x] ✅ LLM_API_KEY 服务端隔离已核查（build 后 grep .next/static：无 key 明文 / 无 LLM_API_KEY / 无 baseURL）。可选加 `import 'server-only'` 编译期守卫（需装 server-only 包）
 
 ---
 
