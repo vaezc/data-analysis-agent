@@ -197,10 +197,10 @@
 ### 4.4 工程
 
 - [x] ✅ 工具系统重构：自注册 registry + zod 校验（Phase 5，借鉴 Hermes Agent）
-- [ ] 工具单测（`__tests__/tools/`）
+- [x] ✅ 工具单测（vitest，`lib/tools/*.test.ts`：sqlite-runner 23 + registry 10 = 33）
 - [ ] CSV/Excel 解析的边界用例测试
 - [ ] 添加 ESLint 规则禁止 `any`、强制 explicit return type
-- [ ] CI（GitHub Actions：tsc + lint + test）
+- [x] ✅ CI（GitHub Actions：prisma generate + tsc + lint + test，push/PR 触发）
 - [ ] 多 Excel sheet 支持（当前只读第一个）
 
 ### 4.5 可观测性
