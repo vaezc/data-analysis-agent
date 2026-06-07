@@ -9,6 +9,11 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Prisma 7 的 prisma.config.ts 在加载时严格解析 env('DIRECT_URL')，缺失即抛错。
+    # CI 只做 generate（仅读 schema，不连库）+ tsc/lint/test（不碰 DB），
+    # 给一个永不被真正连接的占位 URL 即可满足 config 解析。真实连接用 Vercel env。
+    env:
+      DIRECT_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
     steps:
       - uses: actions/checkout@v4
 
@@ -20,7 +25,7 @@ jobs:
       - name: Install deps
         run: npm ci
 
-      # tsc 依赖 @prisma/client 的生成类型；generate 不连数据库，无需 DB 密钥
+      # tsc 依赖生成的 client 类型；generate 只读 schema，用上面的占位 DIRECT_URL，不连库
       - name: Generate Prisma Client
         run: npx prisma generate
 
