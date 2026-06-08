@@ -52,6 +52,31 @@ npx prisma generate                          # 改完 schema 但没改 DB（如�
 npx prisma studio                            # 本地 GUI 看数据
 ```
 
+> **Node 版本**：Prisma 7 要求 Node ≥20.19（`.nvmrc` 锁 20）。若 shell 默认是更低版本，
+> 跑任何 node/npm/npx 前先 `nvm use 20`（或在命令前置 `. "$HOME/.nvm/nvm.sh"; nvm use 20`）。
+
+---
+
+## UI 验证（agent-browser）
+
+验证「视觉/交互」类改动（UI 组件、动效、表单流程）时，用 **agent-browser**（已全局安装的浏览器自动化 CLI）实跑 + 截图，而不是只靠 build 通过。
+
+**核心循环**：
+```bash
+agent-browser open http://localhost:<port>/<path>
+agent-browser snapshot -i            # 看可交互元素，拿 @eN ref（每次页面变化后重新 snapshot）
+agent-browser fill @e4 "text"        # 按 ref 操作：fill / click / press / upload ...
+agent-browser screenshot /tmp/x.png  # 截图（用 Read 工具看图）
+agent-browser close
+```
+
+**鉴权墙**：全站需登录，验证前**播种一个已验证测试用户**（脚本放 `scripts/_*.mts`，下划线前缀 + 不提交）：
+- 用 `lib/generated/prisma/client` + `PrismaPg` adapter 连库；`bcrypt.hash(pw, 12)`；`emailVerified: new Date()`（绕过邮箱验证门）。
+- 需要列表类 UI（如数据集搜索 ≥6 才显示）就顺带 seed 足量数据。
+- 登录走 credentials 表单（bcrypt 校验约 8s，`wait` 久一点再判跳转）。
+
+**铁律**：`npm run dev` 连的是**同一个生产 Supabase 库**。验证完**必须清理**——删测试用户即可（`User→Dataset→Message` 全 `onDelete: Cascade`），再删临时脚本，确认 `git status` 干净。
+
 ---
 
 ## 项目背景
